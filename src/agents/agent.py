@@ -78,8 +78,14 @@ class CyberCoreGraph:
             k=self._retrieve_top_k,
         )
         if not docs:
-            logger.debug("No relevant long-term memories found")
-            return {"long_term_context": ""}
+            logger.debug("No keyword-matched long-term memories, fallback to recent memories")
+            docs = self._memory_store.retrieve_recent(
+                user_id=self._user_id,
+                k=self._retrieve_top_k,
+            )
+            if not docs:
+                logger.debug("No long-term memories found")
+                return {"long_term_context": ""}
 
         lines = [f"- {doc.page_content}" for doc in docs]
         logger.debug("Retrieved %s long-term memory items", len(lines))

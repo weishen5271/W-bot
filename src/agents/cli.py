@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
+from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -29,6 +31,35 @@ console = Console()
 logger = get_logger(__name__)
 
 
+class SessionStateStore:
+    def __init__(self, file_path: str) -> None:
+        self._file_path = file_path
+
+    def load(self) -> str | None:
+        if not os.path.exists(self._file_path):
+            return None
+
+        try:
+            with open(self._file_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            logger.exception("Failed to load session state file: %s", self._file_path)
+            return None
+
+        session_id = payload.get("session_id") if isinstance(payload, dict) else None
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+        return None
+
+    def save(self, session_id: str) -> None:
+        folder = os.path.dirname(os.path.abspath(self._file_path))
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder, exist_ok=True)
+
+        with open(self._file_path, "w", encoding="utf-8") as f:
+            json.dump({"session_id": session_id}, f, ensure_ascii=True, indent=2)
+
+
 def run_cli() -> None:
     setup_logging()
     logger.info("Starting CyberCore CLI runtime")
@@ -38,16 +69,13 @@ def run_cli() -> None:
     except ImportError as exc:  # pragma: no cover - environment dependent
         logger.exception("Failed to import PostgresSaver")
         raise RuntimeError(
-            "无法导入 PostgresSaver。请安装 psycopg 二进制依赖，例如："
-            " pip install 'psycopg[binary]'，并确保本机可用 libpq。"
+            "PostgresSaver import failed. Please install psycopg first: "
+            "pip install 'psycopg[binary]'"
         ) from exc
 
     settings = load_settings()
     llm = build_llm(settings)
-    memory_store = LongTermMemoryStore(
-        milvus_uri=settings.milvus_uri,
-        collection_name=settings.memory_collection,
-    )
+    memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
@@ -83,22 +111,45 @@ def build_llm(settings: Settings) -> ChatOpenAI:
 
 
 def _repl(graph: Any, settings: Settings) -> None:
-    console.print("[bold cyan]CyberCore CLI[/bold cyan] 已启动，输入 quit/exit 退出。")
+    console.print("[bold cyan]CyberCore CLI[/bold cyan] | type quit/exit to leave")
+
+    session_store = SessionStateStore(settings.session_state_file_path)
+    current_session_id = session_store.load() or settings.session_id
+    session_store.save(current_session_id)
+    logger.info("Loaded session_id=%s", current_session_id)
+    console.print(
+        f"[bold green]Current session:[/bold green] {current_session_id}  ([bold]/new[/bold] for new session)"
+    )
+
     seen_message_ids: set[str] = set()
+    _render_existing_session_history(
+        graph=graph,
+        session_id=current_session_id,
+        seen_message_ids=seen_message_ids,
+    )
 
     while True:
         user_text = input("\nYou > ").strip()
         if not user_text:
             continue
+
+        if user_text.lower() == "/new":
+            current_session_id = datetime.now().strftime("cli_session_%Y%m%d_%H%M%S")
+            session_store.save(current_session_id)
+            seen_message_ids.clear()
+            logger.info("Created new session via /new: %s", current_session_id)
+            console.print(f"[bold green]Started new session:[/bold green] {current_session_id}")
+            continue
+
         if user_text.lower() in {"quit", "exit"}:
             logger.info("User requested exit")
-            console.print("[bold yellow]已退出。[/bold yellow]")
+            console.print("[bold yellow]Session closed.[/bold yellow]")
             return
 
         logger.info("Received user input, len=%s", len(user_text))
         config = {
             "configurable": {
-                "thread_id": settings.thread_id,
+                "thread_id": current_session_id,
             }
         }
         inputs = {"messages": [HumanMessage(content=user_text)]}
@@ -114,6 +165,32 @@ def _repl(graph: Any, settings: Settings) -> None:
             seen_message_ids.add(msg_id)
             logger.debug("Rendering message: kind=%s, id=%s", message_kind(last), msg_id)
             _render_message(last)
+
+
+def _render_existing_session_history(
+    *,
+    graph: Any,
+    session_id: str,
+    seen_message_ids: set[str],
+) -> None:
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        snapshot = graph.get_state(config)
+    except Exception:
+        logger.exception("Failed to load session history for thread_id=%s", session_id)
+        return
+
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages", [])
+    if not messages:
+        console.print("[dim]No previous messages in this session.[/dim]")
+        return
+
+    console.print(f"[bold cyan]Restored {len(messages)} message(s) from previous session:[/bold cyan]")
+    for idx, message in enumerate(messages, start=1):
+        msg_id = getattr(message, "id", None) or f"{idx}-{message_kind(message)}"
+        seen_message_ids.add(msg_id)
+        _render_message(message)
 
 
 def _render_message(message: Any) -> None:

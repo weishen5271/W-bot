@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 
 from dotenv import load_dotenv
 from .logging_config import get_logger
@@ -16,10 +17,10 @@ class Settings:
     bailian_model_name: str
     e2b_api_key: str
     postgres_dsn: str
-    milvus_uri: str
-    memory_collection: str
+    memory_file_path: str
     user_id: str
-    thread_id: str
+    session_id: str
+    session_state_file_path: str
     retrieve_top_k: int
 
 
@@ -35,20 +36,25 @@ def load_settings() -> Settings:
         bailian_model_name=os.getenv("BAILIAN_MODEL_NAME", "qwen-plus"),
         e2b_api_key=_must_env("E2B_API_KEY"),
         postgres_dsn=_must_env("POSTGRES_DSN"),
-        milvus_uri=os.getenv("MILVUS_URI", "http://localhost:19530"),
-        memory_collection=os.getenv(
-            "CYBERCORE_MEMORY_COLLECTION", "cybercore_long_term_memory_cli"
-        ),
+        memory_file_path=os.getenv("CYBERCORE_MEMORY_FILE", "MEMORY.MD"),
         user_id=os.getenv("CYBERCORE_USER_ID", "cli_user"),
-        thread_id=os.getenv("CYBERCORE_THREAD_ID", "cli_thread_main"),
+        session_id=os.getenv(
+            "CYBERCORE_SESSION_ID",
+            datetime.now().strftime("cli_session_%Y%m%d_%H%M%S"),
+        ),
+        session_state_file_path=os.getenv(
+            "CYBERCORE_SESSION_STATE_FILE",
+            ".cybercore_session.json",
+        ),
         retrieve_top_k=int(os.getenv("CYBERCORE_RETRIEVE_TOP_K", "4")),
     )
     logger.info(
-        "Settings loaded: model=%s, thread_id=%s, user_id=%s, milvus_uri=%s, top_k=%s",
+        "Settings loaded: model=%s, session_id=%s, user_id=%s, memory_file=%s, session_state_file=%s, top_k=%s",
         settings.bailian_model_name,
-        settings.thread_id,
+        settings.session_id,
         settings.user_id,
-        settings.milvus_uri,
+        settings.memory_file_path,
+        settings.session_state_file_path,
         settings.retrieve_top_k,
     )
     return settings
