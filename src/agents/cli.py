@@ -60,7 +60,7 @@ class SessionStateStore:
             json.dump({"session_id": session_id}, f, ensure_ascii=True, indent=2)
 
 
-def run_cli() -> None:
+def run_cli(config_path: str = "configs/app.json") -> None:
     setup_logging()
     logger.info("Starting CyberCore CLI runtime")
 
@@ -73,7 +73,7 @@ def run_cli() -> None:
             "pip install 'psycopg[binary]'"
         ) from exc
 
-    settings = load_settings()
+    settings = load_settings(config_path=config_path)
     llm = build_llm(settings)
     memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
     tools = build_tools(

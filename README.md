@@ -34,31 +34,35 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-3. Configure env:
+3. Configure app JSON:
 
 ```bash
-cp .env.example .env
+cp configs/app.json.example configs/app.json
+# Then fill your real keys/secrets in configs/app.json
 ```
 
 4. Run:
 
 ```bash
-python main.py
+python main.py cli --config configs/app.json
 ```
+
+Feishu gateway mode:
+
+```bash
+python main.py feishu --config configs/app.json
+```
+
+If `configs/app.json` does not exist, the app will auto-generate a template file.
+Fill `channels.feishu.appId` and `channels.feishu.appSecret` before restarting.
 
 Type `quit` or `exit` to leave.
 
 By default, the CLI resumes the previous short-term session automatically.
 Type `/new` in the CLI to start a brand new session context.
 
-Optional env:
-
-- `TAVILY_API_KEY`: Tavily API key used by `web_search`.
-- `CYBERCORE_SESSION_STATE_FILE`: file used to persist the latest `session_id` (default: `.cybercore_session.json`).
-- `CYBERCORE_ENABLE_EXEC_TOOL`: enable `exec` tool (`true/false`, default: `false`).
-- `CYBERCORE_ENABLE_CRON_SERVICE`: enable `cron` tool (`true/false`, default: `false`).
-- `CYBERCORE_MCP_SERVERS`: JSON array for MCP auto-discovery and dynamic tool registration.
-  Example:
+All runtime settings are now configured in `configs/app.json`.
+Example MCP server config:
 
 ```json
 [
@@ -81,3 +85,5 @@ Optional env:
 - `src/agents/agent.py`: LangGraph nodes and routing.
 - `src/agents/memory.py`: local `MEMORY.MD` long-term memory store.
 - `src/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
+- `src/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
+- `configs/app.json`: unified app configuration (`agent + channels`).
