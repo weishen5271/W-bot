@@ -80,6 +80,10 @@ def run_cli() -> None:
         memory_store=memory_store,
         user_id=settings.user_id,
         e2b_api_key=settings.e2b_api_key,
+        tavily_api_key=settings.tavily_api_key,
+        enable_exec_tool=settings.enable_exec_tool,
+        enable_cron_service=settings.enable_cron_service,
+        mcp_servers=settings.mcp_servers,
     )
 
     logger.info("Initializing Postgres checkpointer")

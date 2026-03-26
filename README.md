@@ -53,11 +53,31 @@ Type `/new` in the CLI to start a brand new session context.
 
 Optional env:
 
+- `TAVILY_API_KEY`: Tavily API key used by `web_search`.
 - `CYBERCORE_SESSION_STATE_FILE`: file used to persist the latest `session_id` (default: `.cybercore_session.json`).
+- `CYBERCORE_ENABLE_EXEC_TOOL`: enable `exec` tool (`true/false`, default: `false`).
+- `CYBERCORE_ENABLE_CRON_SERVICE`: enable `cron` tool (`true/false`, default: `false`).
+- `CYBERCORE_MCP_SERVERS`: JSON array for MCP auto-discovery and dynamic tool registration.
+  Example:
+
+```json
+[
+  {
+    "name": "planner",
+    "base_url": "http://127.0.0.1:8081",
+    "enabled": true,
+    "discovery_path": "/tools",
+    "invoke_path_template": "/tools/{tool}",
+    "headers": {
+      "Authorization": "Bearer <token>"
+    }
+  }
+]
+```
 
 ## Key files
 
 - `src/agents/cli.py`: CLI runtime and Postgres checkpoint wiring.
 - `src/agents/agent.py`: LangGraph nodes and routing.
 - `src/agents/memory.py`: local `MEMORY.MD` long-term memory store.
-- `src/agents/tools/runtime.py`: tools (`execute_python`, `save_memory`).
+- `src/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
