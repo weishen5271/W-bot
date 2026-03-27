@@ -1,0 +1,44 @@
+{
+  "agent": {
+    "dashscopeApiKey": "",
+    "bailianBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "bailianModelName": "qwen-plus",
+    "tavilyApiKey": "",
+    "postgresDsn": "",
+    "milvusUri": "http://<host>:19530",
+    "memoryCollection": "w_bot_long_term_memory_cli",
+    "memoryFilePath": "MEMORY.MD",
+    "userId": "feishu_bot",
+    "sessionId": "",
+    "sessionStateFilePath": ".w_bot_session.json",
+    "retrieveTopK": 4,
+    "enableExecTool": false,
+    "enableCronService": false,
+    "mcpServers": [],
+    "enableSkills": true,
+    "skillsWorkspaceDir": "skills",
+    "skillsBuiltinDir": "",
+    "tokenOptimization": {
+      "enabled": true,
+      "maxRecentUserTurns": 6,
+      "summaryTriggerMessages": 12,
+      "summaryMaxChars": 1200
+    }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "cli_xxx",
+      "appSecret": "xxx",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": [
+        "*"
+      ],
+      "groupPolicy": "mention",
+      "replyToMessage": true,
+      "reactEmoji": "THUMBSUP"
+    }
+  },
+  "threadPrefix": "feishu"
+}

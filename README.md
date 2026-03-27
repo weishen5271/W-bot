@@ -66,6 +66,12 @@ python main.py feishu --config configs/app.json
 在 CLI 中输入 `/new` 可开启全新的会话上下文。
 
 所有运行时配置统一放在 `configs/app.json`。
+短期记忆优化可通过 `agent.shortTermMemoryOptimization` 配置，默认开启并包含：
+
+- 分级记忆：仅保留最近 `keepRecentCheckpoints` 条 checkpoint。
+- 摘要替代：历史 checkpoint 按 `summaryBatchSize` 写入 `checkpoint_rolling_summaries`。
+- 去重压缩：归档数据写入 `checkpoint_blob_store` 与 `checkpoint_cold_archive_entries`，随后删除原始历史记录。
+
 多模态能力可通过 `agent.multimodal.enabled` 开关控制，默认模板已包含：
 
 - 飞书图片会下载到本地 `media/` 并以原生图像块送入模型。
@@ -94,7 +100,7 @@ MCP server 配置示例：
 
 项目支持基于文件的 Skill，并按需渐进加载：
 
-- 内置 skills：`src/agents/skills_catalog/<skill>/SKILL.md`
+- 内置 skills：`w_bot/agents/skills_catalog/<skill>/SKILL.md`
 - 工作区 skills：`skills/<skill>/SKILL.md`（同名时覆盖内置）
 - 满足条件时，`always: true` 的 skill 会注入系统提示词。
 - 所有 skill 会在运行时摘要中展示，模型可按需通过 `read_file` 加载完整内容。
@@ -116,11 +122,11 @@ Skill 依赖从 frontmatter 元数据读取：
 
 ### 关键文件
 
-- `src/agents/cli.py`：CLI 运行时与 Postgres checkpoint 连接。
-- `src/agents/agent.py`：LangGraph 节点与路由。
-- `src/agents/context.py`：系统提示词组装（memory + skills）。
-- `src/agents/memory.py`：本地 `MEMORY.MD` 长期记忆存储。
-- `src/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
-- `src/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
-- `src/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。
+- `w_bot/agents/cli.py`：CLI 运行时与 Postgres checkpoint 连接。
+- `w_bot/agents/agent.py`：LangGraph 节点与路由。
+- `w_bot/agents/context.py`：系统提示词组装（memory + skills）。
+- `w_bot/agents/memory.py`：本地 `MEMORY.MD` 长期记忆存储。
+- `w_bot/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
+- `w_bot/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
+- `w_bot/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。
 - `configs/app.json`：统一应用配置（`agent + channels`）。

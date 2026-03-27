@@ -40,6 +40,17 @@
       "maxRecentUserTurns": 6,
       "summaryTriggerMessages": 12,
       "summaryMaxChars": 1200
+    },
+    "shortTermMemoryOptimization": {
+      "enabled": true,
+      "runOnStartup": true,
+      "intervalMinutes": 15,
+      "keepRecentCheckpoints": 120,
+      "summaryBatchSize": 20,
+      "maxThreadsPerRun": 20,
+      "maxCheckpointsPerThread": 400,
+      "archiveBeforeDelete": true,
+      "compressLevel": 6
     }
   },
   "channels": {

@@ -66,6 +66,12 @@ By default, the CLI resumes the previous short-term session automatically.
 Type `/new` in the CLI to start a brand new session context.
 
 All runtime settings are configured in `configs/app.json`.
+Short-term memory optimization is controlled by `agent.shortTermMemoryOptimization` (enabled by default), including:
+
+- Tiered memory: keep only the latest `keepRecentCheckpoints` checkpoints.
+- Summary replacement: roll old checkpoints into `checkpoint_rolling_summaries` by `summaryBatchSize`.
+- Dedup + compression: archive blobs into `checkpoint_blob_store` + `checkpoint_cold_archive_entries`, then delete old raw records.
+
 Example MCP server config:
 
 ```json
@@ -87,7 +93,7 @@ Example MCP server config:
 
 This project supports file-based skills with progressive loading:
 
-- Builtin skills: `src/agents/skills_catalog/<skill>/SKILL.md`
+- Builtin skills: `w_bot/agents/skills_catalog/<skill>/SKILL.md`
 - Workspace skills: `skills/<skill>/SKILL.md` (overrides builtin on same name)
 - `always: true` skills are injected into system prompt when requirements are met.
 - All skills are listed in a runtime summary, and the model can load full content on demand using `read_file`.
@@ -109,11 +115,11 @@ To use it, make sure:
 
 ### Key Files
 
-- `src/agents/cli.py`: CLI runtime and Postgres checkpoint wiring.
-- `src/agents/agent.py`: LangGraph nodes and routing.
-- `src/agents/context.py`: system prompt assembly (memory + skills).
-- `src/agents/memory.py`: local `MEMORY.MD` long-term memory store.
-- `src/agents/skills.py`: skill discovery, availability checks, and summary rendering.
-- `src/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
-- `src/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
+- `w_bot/agents/cli.py`: CLI runtime and Postgres checkpoint wiring.
+- `w_bot/agents/agent.py`: LangGraph nodes and routing.
+- `w_bot/agents/context.py`: system prompt assembly (memory + skills).
+- `w_bot/agents/memory.py`: local `MEMORY.MD` long-term memory store.
+- `w_bot/agents/skills.py`: skill discovery, availability checks, and summary rendering.
+- `w_bot/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
+- `w_bot/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
 - `configs/app.json`: unified app configuration (`agent + channels`).

@@ -23,13 +23,10 @@ dependencies = [
     "lark-oapi>=1.4.20,<2.0.0",
 ]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
 
 [project.scripts]
-w-bot = "agents.cli:run_cli"
-agents-cli = "agents.cli:run_cli"
-agents-feishu = "channels.feishu.gateway:main"
+w-bot = "w_bot.__main__:main"
+agents-cli = "w_bot.agents.cli:run_cli"
+agents-feishu = "w_bot.channels.feishu.gateway:main"

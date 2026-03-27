@@ -61,7 +61,7 @@ J <---> B
 ### 关键代码（可直接贴）
 
 ```python
-# src/agents/cli.py
+# w_bot/agents/cli.py
 with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
     if hasattr(checkpointer, "setup"):
         checkpointer.setup()
@@ -77,7 +77,7 @@ with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
 ```
 
 ```python
-# src/agents/cli.py
+# w_bot/agents/cli.py
 config = {
     "configurable": {
         "thread_id": current_session_id,
@@ -91,7 +91,7 @@ for event in graph.stream(inputs, config=config, stream_mode="values"):
 ### 会话恢复与新建
 
 ```python
-# src/agents/cli.py
+# w_bot/agents/cli.py
 session_store = SessionStateStore(settings.session_state_file_path)
 current_session_id = session_store.load() or settings.session_id
 session_store.save(current_session_id)
@@ -122,7 +122,7 @@ if user_text.lower() == "/new":
 ### 关键类与模板渲染
 
 ```python
-# src/agents/memory.py
+# w_bot/agents/memory.py
 SECTION_ORDER = [
     "User Information",
     "Preferences",
@@ -139,7 +139,7 @@ SECTION_PLACEHOLDERS = {
 ```
 
 ```python
-# src/agents/memory.py
+# w_bot/agents/memory.py
 def _render_template(sections: dict[str, list[str]]) -> str:
     lines: list[str] = [HEADER, "", DESCRIPTION, ""]
     for section in SECTION_ORDER:
@@ -164,7 +164,7 @@ def _render_template(sections: dict[str, list[str]]) -> str:
 ### 工具定义
 
 ```python
-# src/agents/tools/runtime.py
+# w_bot/agents/tools/runtime.py
 @tool
 def save_memory(text: str, memory_type: str = "experience") -> str:
     doc_id = memory_store.save(user_id=user_id, text=text, memory_type=memory_type)
@@ -176,7 +176,7 @@ def save_memory(text: str, memory_type: str = "experience") -> str:
 ### 存储逻辑
 
 ```python
-# src/agents/memory.py
+# w_bot/agents/memory.py
 def save(self, user_id: str, text: str, memory_type: str = "experience") -> str:
     clean_text = " ".join((text or "").strip().split())
     if not clean_text:
@@ -202,7 +202,7 @@ def save(self, user_id: str, text: str, memory_type: str = "experience") -> str:
 ### 类型映射
 
 ```python
-# src/agents/memory.py
+# w_bot/agents/memory.py
 def _map_section(memory_type: str) -> str:
     key = (memory_type or "").strip().lower()
     if key in {"preference", "preferences"}:
@@ -223,7 +223,7 @@ def _map_section(memory_type: str) -> str:
 ### 检索节点
 
 ```python
-# src/agents/agent.py
+# w_bot/agents/agent.py
 def _retrieve_memories(self, state: AgentState, _: RunnableConfig | None = None) -> dict[str, str]:
     query = _extract_last_user_message(state.get("messages", []))
     if not query:
@@ -249,7 +249,7 @@ def _retrieve_memories(self, state: AgentState, _: RunnableConfig | None = None)
 ### 关键词打分（轻量可解释）
 
 ```python
-# src/agents/memory.py
+# w_bot/agents/memory.py
 def _score_text(text: str, query: str) -> int:
     query = (query or "").strip()
     if not query:
@@ -269,7 +269,7 @@ def _score_text(text: str, query: str) -> int:
 ### 注入到系统上下文
 
 ```python
-# src/agents/agent.py
+# w_bot/agents/agent.py
 memory_context = state.get("long_term_context") or "无"
 memory_block = f"已检索到的长期记忆:\n{memory_context}"
 
