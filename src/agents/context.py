@@ -31,7 +31,12 @@ class ContextBuilder:
         summary = self._skills_loader.build_skills_summary()
         blocks.append(
             "可用 Skill 摘要如下。"
-            "当任务需要某个 skill 时，先使用 read_file 读取对应 SKILL.md 全文，再按其步骤执行。\n"
+            "执行规则："
+            "A) 先检查是否有与用户请求匹配的可用 skill；"
+            "B) 若用户显式点名 skill，且该 skill 可用，必须优先使用；"
+            "C) 命中后先使用 read_file 读取对应 SKILL.md 全文，再按其步骤执行；"
+            "D) 若多个 skill 同时命中，选择最小必要集合，不做无关 skill 扩展；"
+            "E) 若未命中或不可用，在最终答复里说明未使用原因。\n"
             f"{summary}"
         )
         return "\n\n".join(blocks)

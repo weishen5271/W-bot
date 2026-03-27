@@ -221,10 +221,11 @@ class FeishuGateway:
     def _ask_agent(self, *, inbound: InboundMessage, session_id: str) -> str:
         config = {"configurable": {"thread_id": session_id}}
         media_payload = [item.to_dict() for item in inbound.media]
+        prompt_text = _build_inbound_prompt_text(inbound)
         inputs = {
             "messages": [
                 HumanMessage(
-                    content=inbound.content or "",
+                    content=prompt_text,
                     additional_kwargs={"media": media_payload} if media_payload else {},
                 )
             ]
@@ -781,6 +782,38 @@ def _guess_kind_from_filename(name: str) -> str:
     ):
         return "document"
     return "other"
+
+
+def _build_inbound_prompt_text(inbound: InboundMessage) -> str:
+    user_text = inbound.content.strip()
+    if not inbound.media:
+        return user_text
+
+    kinds = sorted({item.kind for item in inbound.media})
+    lines = [
+        "用户本轮发送了附件，请不要按纯文本聊天方式处理。",
+        f"附件类型: {', '.join(kinds)}",
+    ]
+    for kind in kinds:
+        lines.append(f"- {kind}: {_kind_strategy(kind)}")
+
+    if user_text:
+        lines.append(f"用户文本诉求: {user_text}")
+    else:
+        lines.append("用户未提供额外文本诉求，请先基于附件给出处理结果和下一步建议。")
+    return "\n".join(lines)
+
+
+def _kind_strategy(kind: str) -> str:
+    if kind == "image":
+        return "先识别图片关键信息，再结合用户目标执行。"
+    if kind == "audio":
+        return "先转写/总结音频内容，再执行后续任务。"
+    if kind == "video":
+        return "先提取视频关键内容（可说明限制），再执行任务。"
+    if kind == "document":
+        return "先读取并理解文档内容，再进行分析、总结或改写。"
+    return "先说明可处理范围，并请求用户给出明确目标。"
 
 
 def _flatten_post_text(content: dict[str, Any]) -> str:
