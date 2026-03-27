@@ -76,7 +76,17 @@ def run_cli(config_path: str = "configs/app.json") -> None:
         ) from exc
 
     settings = load_settings(config_path=config_path)
-    llm = build_llm(settings)
+    llm_text = build_llm(settings, model_name=settings.model_routing.text_model_name)
+    llm_image = (
+        build_llm(settings, model_name=settings.model_routing.image_model_name)
+        if settings.model_routing.image_model_name
+        else None
+    )
+    llm_audio = (
+        build_llm(settings, model_name=settings.model_routing.audio_model_name)
+        if settings.model_routing.audio_model_name
+        else None
+    )
     memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
     skills_loader = (
         SkillsLoader(
@@ -103,22 +113,28 @@ def run_cli(config_path: str = "configs/app.json") -> None:
             checkpointer.setup()
 
         graph = WBotGraph(
-            llm=llm,
+            llm=llm_text,
             tools=tools,
             memory_store=memory_store,
             retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
             checkpointer=checkpointer,
             skills_loader=skills_loader,
+            multimodal_settings=settings.multimodal,
+            model_name=settings.model_routing.text_model_name,
+            llm_image=llm_image,
+            llm_audio=llm_audio,
+            image_model_name=settings.model_routing.image_model_name,
+            audio_model_name=settings.model_routing.audio_model_name,
         ).app
 
         logger.info("Graph ready, entering REPL loop")
         _repl(graph=graph, settings=settings)
 
 
-def build_llm(settings: Settings) -> ChatOpenAI:
+def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
     return ChatOpenAI(
-        model=settings.bailian_model_name,
+        model=model_name,
         api_key=settings.dashscope_api_key,
         base_url=settings.bailian_base_url,
         temperature=0.2,

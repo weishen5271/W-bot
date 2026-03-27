@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +22,7 @@ from agents.logging_config import get_logger, setup_logging
 from agents.memory import LongTermMemoryStore
 from agents.skills import SkillsLoader
 from agents.tools.runtime import build_tools
+from channels.models import InboundMedia, InboundMessage
 
 logger = get_logger(__name__)
 
@@ -59,15 +65,28 @@ class GatewayConfig:
 
 
 class FeishuGateway:
-    def __init__(self, *, graph: Any, config: FeishuConfig, thread_prefix: str) -> None:
+    def __init__(
+        self,
+        *,
+        graph: Any,
+        config: FeishuConfig,
+        thread_prefix: str,
+        media_root_dir: str = "media",
+    ) -> None:
         self._graph = graph
         self._config = config
         self._thread_prefix = thread_prefix
         self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
         self._seen_lock = threading.Lock()
         self._graph_lock = threading.Lock()
+        self._session_lock = threading.Lock()
+        self._session_overrides: dict[str, str] = {}
         self._client: Any | None = None
         self._lark: Any | None = None
+        self._media_root = Path(media_root_dir).expanduser()
+        if not self._media_root.is_absolute():
+            self._media_root = Path.cwd() / self._media_root
+        self._media_root.mkdir(parents=True, exist_ok=True)
 
     def start(self) -> None:
         if not self._config.enabled:
@@ -152,8 +171,13 @@ class FeishuGateway:
             return
 
         text = self._extract_text(content_raw=message.get("content"), message_type=message_type)
-        if not text.strip():
-            logger.info("Skip non-text message currently unsupported: type=%s", message_type)
+        media = self._extract_media(
+            message_id=message_id,
+            message_type=message_type,
+            content_raw=message.get("content"),
+        )
+        if not text.strip() and not media:
+            logger.info("Skip empty/unsupported message: type=%s", message_type)
             return
 
         if chat_type == "group" and self._config.group_policy == "mention":
@@ -165,8 +189,25 @@ class FeishuGateway:
             self._add_reaction(message_id=message_id, emoji_type=self._config.react_emoji)
 
         session_key = chat_id if chat_type == "group" else (open_id or chat_id)
-        session_id = f"{self._thread_prefix}:{session_key}"
-        reply_text = self._ask_agent(text=text, session_id=session_id)
+        if self._is_new_session_command(text):
+            session_id = f"{self._thread_prefix}:{session_key}:{int(time.time() * 1000)}"
+            with self._session_lock:
+                self._session_overrides[session_key] = session_id
+            self._send_text(
+                chat_id=chat_id,
+                open_id=open_id,
+                text=f"已为当前会话创建新上下文：`{session_id}`",
+                reply_to_message_id=message_id if self._config.reply_to_message else "",
+            )
+            return
+
+        with self._session_lock:
+            session_id = self._session_overrides.get(
+                session_key,
+                f"{self._thread_prefix}:{session_key}",
+            )
+        inbound = InboundMessage(content=text, media=media)
+        reply_text = self._ask_agent(inbound=inbound, session_id=session_id)
         if not reply_text.strip():
             reply_text = "我收到了你的消息，但暂时没有生成可用回复。"
 
@@ -177,9 +218,17 @@ class FeishuGateway:
             reply_to_message_id=message_id if self._config.reply_to_message else "",
         )
 
-    def _ask_agent(self, *, text: str, session_id: str) -> str:
+    def _ask_agent(self, *, inbound: InboundMessage, session_id: str) -> str:
         config = {"configurable": {"thread_id": session_id}}
-        inputs = {"messages": [HumanMessage(content=text)]}
+        media_payload = [item.to_dict() for item in inbound.media]
+        inputs = {
+            "messages": [
+                HumanMessage(
+                    content=inbound.content or "",
+                    additional_kwargs={"media": media_payload} if media_payload else {},
+                )
+            ]
+        }
         latest_ai_text = ""
 
         with self._graph_lock:
@@ -326,6 +375,13 @@ class FeishuGateway:
         return bool(open_id) and open_id in allow
 
     @staticmethod
+    def _is_new_session_command(text: str) -> bool:
+        normalized = text.strip().lower()
+        if normalized == "/new":
+            return True
+        return any(line.strip().lower() == "/new" for line in text.splitlines())
+
+    @staticmethod
     def _extract_text(*, content_raw: Any, message_type: str) -> str:
         if not isinstance(content_raw, str) or not content_raw.strip():
             return ""
@@ -345,6 +401,192 @@ class FeishuGateway:
             return _flatten_post_text(content)
 
         return str(content)
+
+    def _extract_media(
+        self,
+        *,
+        message_id: str,
+        message_type: str,
+        content_raw: Any,
+    ) -> list[InboundMedia]:
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return []
+
+        try:
+            content = json.loads(content_raw)
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(content, dict):
+            return []
+
+        message_type = message_type.lower().strip()
+        if message_type == "image":
+            image_key = str(content.get("image_key") or "").strip()
+            if not image_key:
+                return []
+            item = self._download_media_item(
+                message_id=message_id,
+                resource_key=image_key,
+                resource_type="image",
+                suggested_name=f"{image_key}.png",
+                kind="image",
+                meta={},
+            )
+            return [item] if item is not None else []
+
+        if message_type == "audio":
+            file_key = str(content.get("file_key") or "").strip()
+            if not file_key:
+                return []
+            item = self._download_media_item(
+                message_id=message_id,
+                resource_key=file_key,
+                resource_type="audio",
+                suggested_name=str(content.get("file_name") or f"{file_key}.mp3"),
+                kind="audio",
+                meta={"duration": content.get("duration")},
+            )
+            return [item] if item is not None else []
+
+        if message_type in {"file", "media"}:
+            file_key = str(content.get("file_key") or "").strip()
+            if not file_key:
+                return []
+            filename = str(content.get("file_name") or content.get("name") or f"{file_key}.bin")
+            kind = _guess_kind_from_filename(filename)
+            item = self._download_media_item(
+                message_id=message_id,
+                resource_key=file_key,
+                resource_type="file",
+                suggested_name=filename,
+                kind=kind,
+                meta={},
+            )
+            return [item] if item is not None else []
+
+        if message_type == "video":
+            file_key = str(content.get("file_key") or "").strip()
+            if not file_key:
+                return []
+            item = self._download_media_item(
+                message_id=message_id,
+                resource_key=file_key,
+                resource_type="video",
+                suggested_name=str(content.get("file_name") or f"{file_key}.mp4"),
+                kind="video",
+                meta={"duration": content.get("duration")},
+            )
+            return [item] if item is not None else []
+
+        return []
+
+    def _download_media_item(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str,
+        suggested_name: str,
+        kind: str,
+        meta: dict[str, Any],
+    ) -> InboundMedia | None:
+        token = self._fetch_app_access_token()
+        if not token:
+            logger.warning("Cannot download media because app access token is unavailable")
+            return None
+
+        content, mime = self._download_message_resource(
+            message_id=message_id,
+            resource_key=resource_key,
+            resource_type=resource_type,
+            access_token=token,
+        )
+        if content is None:
+            return None
+
+        target = self._media_root / time.strftime("%Y%m%d")
+        target.mkdir(parents=True, exist_ok=True)
+        safe_name = _sanitize_filename(suggested_name)
+        file_path = target / f"{uuid.uuid4().hex}_{safe_name}"
+        file_path.write_bytes(content)
+
+        digest = hashlib.sha256(content).hexdigest()
+        return InboundMedia(
+            id=resource_key,
+            path=str(file_path),
+            mime=mime,
+            kind=kind,
+            size_bytes=len(content),
+            sha256=digest,
+            meta=dict(meta),
+        )
+
+    def _fetch_app_access_token(self) -> str:
+        url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
+        payload = {
+            "app_id": self._config.app_id,
+            "app_secret": self._config.app_secret,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url=url,
+            method="POST",
+            data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode("utf-8")
+        except (urllib.error.URLError, TimeoutError):
+            logger.exception("Failed to fetch Feishu app access token")
+            return ""
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            logger.error("Invalid token response from Feishu")
+            return ""
+
+        if int(parsed.get("code", -1)) != 0:
+            logger.error("Token API returned error: code=%s msg=%s", parsed.get("code"), parsed.get("msg"))
+            return ""
+        token = parsed.get("app_access_token")
+        return str(token or "")
+
+    def _download_message_resource(
+        self,
+        *,
+        message_id: str,
+        resource_key: str,
+        resource_type: str,
+        access_token: str,
+    ) -> tuple[bytes | None, str]:
+        encoded_key = urllib.parse.quote(resource_key, safe="")
+        encoded_message_id = urllib.parse.quote(message_id, safe="")
+        query = urllib.parse.urlencode({"type": resource_type})
+        url = (
+            "https://open.feishu.cn/open-apis/im/v1/messages/"
+            f"{encoded_message_id}/resources/{encoded_key}?{query}"
+        )
+        req = urllib.request.Request(
+            url=url,
+            method="GET",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read()
+                mime = resp.headers.get("Content-Type", "application/octet-stream")
+                return body, mime
+        except (urllib.error.URLError, TimeoutError):
+            logger.exception(
+                "Failed to download Feishu media resource, message_id=%s, key=%s, type=%s",
+                message_id,
+                resource_key,
+                resource_type,
+            )
+            return None, "application/octet-stream"
 
     @staticmethod
     def _is_group_mentioned(*, event: dict[str, Any], text: str) -> bool:
@@ -395,7 +637,17 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             "PostgresSaver import failed. Please install psycopg first: pip install 'psycopg[binary]'"
         ) from exc
 
-    llm = _build_llm(settings)
+    llm_text = _build_llm(settings, model_name=settings.model_routing.text_model_name)
+    llm_image = (
+        _build_llm(settings, model_name=settings.model_routing.image_model_name)
+        if settings.model_routing.image_model_name
+        else None
+    )
+    llm_audio = (
+        _build_llm(settings, model_name=settings.model_routing.audio_model_name)
+        if settings.model_routing.audio_model_name
+        else None
+    )
     memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
     skills_loader = (
         SkillsLoader(
@@ -420,16 +672,27 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             checkpointer.setup()
 
         graph = WBotGraph(
-            llm=llm,
+            llm=llm_text,
             tools=tools,
             memory_store=memory_store,
             retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
             checkpointer=checkpointer,
             skills_loader=skills_loader,
+            multimodal_settings=settings.multimodal,
+            model_name=settings.model_routing.text_model_name,
+            llm_image=llm_image,
+            llm_audio=llm_audio,
+            image_model_name=settings.model_routing.image_model_name,
+            audio_model_name=settings.model_routing.audio_model_name,
         ).app
 
-        gateway = FeishuGateway(graph=graph, config=cfg.feishu, thread_prefix=cfg.thread_prefix)
+        gateway = FeishuGateway(
+            graph=graph,
+            config=cfg.feishu,
+            thread_prefix=cfg.thread_prefix,
+            media_root_dir=settings.multimodal.media_root_dir,
+        )
         gateway.start()
 
 
@@ -472,11 +735,11 @@ def _write_default_config(target: Path) -> None:
     target.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _build_llm(settings: Any) -> Any:
+def _build_llm(settings: Any, *, model_name: str) -> Any:
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
-        model=settings.bailian_model_name,
+        model=model_name,
         api_key=settings.dashscope_api_key,
         base_url=settings.bailian_base_url,
         temperature=0.2,
@@ -497,6 +760,27 @@ def _coerce_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return ["*"]
+
+
+def _sanitize_filename(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name)
+    cleaned = cleaned.strip("._")
+    return cleaned or "file.bin"
+
+
+def _guess_kind_from_filename(name: str) -> str:
+    lowered = name.lower()
+    if lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+        return "image"
+    if lowered.endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus")):
+        return "audio"
+    if lowered.endswith((".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")):
+        return "video"
+    if lowered.endswith(
+        (".txt", ".md", ".json", ".csv", ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx")
+    ):
+        return "document"
+    return "other"
 
 
 def _flatten_post_text(content: dict[str, Any]) -> str:

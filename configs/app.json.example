@@ -17,7 +17,24 @@
     "mcpServers": [],
     "enableSkills": true,
     "skillsWorkspaceDir": "skills",
-    "skillsBuiltinDir": ""
+    "skillsBuiltinDir": "",
+    "modelRouting": {
+      "textModelName": "qwen-plus",
+      "imageModelName": "",
+      "audioModelName": ""
+    },
+    "multimodal": {
+      "enabled": true,
+      "maxFileBytes": 20971520,
+      "maxTotalBytesPerTurn": 52428800,
+      "maxFilesPerTurn": 10,
+      "audioMode": "auto",
+      "videoKeyframeIntervalSec": 3,
+      "videoMaxFrames": 12,
+      "documentMaxChars": 120000,
+      "tempTtlHours": 24,
+      "mediaRootDir": "media"
+    }
   },
   "channels": {
     "feishu": {

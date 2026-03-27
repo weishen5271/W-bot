@@ -66,6 +66,13 @@ python main.py feishu --config configs/app.json
 在 CLI 中输入 `/new` 可开启全新的会话上下文。
 
 所有运行时配置统一放在 `configs/app.json`。
+多模态能力可通过 `agent.multimodal.enabled` 开关控制，默认模板已包含：
+
+- 飞书图片会下载到本地 `media/` 并以原生图像块送入模型。
+- 音频/视频/文档会进入统一归一化流程，当前默认以文本占位/摘录回退。
+- 历史消息中的大媒体会自动压缩为占位文本，避免会话上下文过大。
+- 可通过 `agent.modelRouting` 配置不同模态使用的模型（text/image/audio）。
+
 MCP server 配置示例：
 
 ```json

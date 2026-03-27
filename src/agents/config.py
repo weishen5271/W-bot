@@ -31,6 +31,29 @@ class Settings:
     enable_skills: bool
     skills_workspace_dir: str
     skills_builtin_dir: str
+    model_routing: "ModelRoutingSettings"
+    multimodal: "MultimodalSettings"
+
+
+@dataclass(frozen=True)
+class MultimodalSettings:
+    enabled: bool
+    max_file_bytes: int
+    max_total_bytes_per_turn: int
+    max_files_per_turn: int
+    audio_mode: str
+    video_keyframe_interval_sec: int
+    video_max_frames: int
+    document_max_chars: int
+    temp_ttl_hours: int
+    media_root_dir: str
+
+
+@dataclass(frozen=True)
+class ModelRoutingSettings:
+    text_model_name: str
+    image_model_name: str
+    audio_model_name: str
 
 
 def load_settings(
@@ -44,6 +67,10 @@ def load_settings(
     merged = dict(agent_cfg)
     if overrides:
         merged.update(overrides)
+    model_routing_payload = (
+        merged.get("modelRouting") if isinstance(merged.get("modelRouting"), dict) else {}
+    )
+    multimodal_payload = merged.get("multimodal") if isinstance(merged.get("multimodal"), dict) else {}
 
     settings = Settings(
         dashscope_api_key=_must_value(merged, "dashscopeApiKey", "dashscope_api_key"),
@@ -101,6 +128,63 @@ def load_settings(
             "skillsBuiltinDir",
             "skills_builtin_dir",
             default="",
+        ),
+        model_routing=ModelRoutingSettings(
+            text_model_name=_string_value(
+                model_routing_payload,
+                "textModelName",
+                "text_model_name",
+                default=_string_value(
+                    merged,
+                    "bailianModelName",
+                    "bailian_model_name",
+                    default="qwen-plus",
+                ),
+            ),
+            image_model_name=_string_value(
+                model_routing_payload,
+                "imageModelName",
+                "image_model_name",
+                default="",
+            ),
+            audio_model_name=_string_value(
+                model_routing_payload,
+                "audioModelName",
+                "audio_model_name",
+                default="",
+            ),
+        ),
+        multimodal=MultimodalSettings(
+            enabled=_bool_value(multimodal_payload, "enabled", default=False),
+            max_file_bytes=_int_value(multimodal_payload, "maxFileBytes", "max_file_bytes", default=20 * 1024 * 1024),
+            max_total_bytes_per_turn=_int_value(
+                multimodal_payload,
+                "maxTotalBytesPerTurn",
+                "max_total_bytes_per_turn",
+                default=50 * 1024 * 1024,
+            ),
+            max_files_per_turn=_int_value(
+                multimodal_payload,
+                "maxFilesPerTurn",
+                "max_files_per_turn",
+                default=10,
+            ),
+            audio_mode=_string_value(multimodal_payload, "audioMode", "audio_mode", default="auto").lower(),
+            video_keyframe_interval_sec=_int_value(
+                multimodal_payload,
+                "videoKeyframeIntervalSec",
+                "video_keyframe_interval_sec",
+                default=3,
+            ),
+            video_max_frames=_int_value(multimodal_payload, "videoMaxFrames", "video_max_frames", default=12),
+            document_max_chars=_int_value(
+                multimodal_payload,
+                "documentMaxChars",
+                "document_max_chars",
+                default=120000,
+            ),
+            temp_ttl_hours=_int_value(multimodal_payload, "tempTtlHours", "temp_ttl_hours", default=24),
+            media_root_dir=_string_value(multimodal_payload, "mediaRootDir", "media_root_dir", default="media"),
         ),
     )
     logger.info(
@@ -160,6 +244,23 @@ def default_app_config() -> dict[str, Any]:
             "enableSkills": True,
             "skillsWorkspaceDir": "skills",
             "skillsBuiltinDir": "",
+            "modelRouting": {
+                "textModelName": "qwen-plus",
+                "imageModelName": "",
+                "audioModelName": "",
+            },
+            "multimodal": {
+                "enabled": True,
+                "maxFileBytes": 20971520,
+                "maxTotalBytesPerTurn": 52428800,
+                "maxFilesPerTurn": 10,
+                "audioMode": "auto",
+                "videoKeyframeIntervalSec": 3,
+                "videoMaxFrames": 12,
+                "documentMaxChars": 120000,
+                "tempTtlHours": 24,
+                "mediaRootDir": "media",
+            },
         },
         "channels": {
             "feishu": {
