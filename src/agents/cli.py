@@ -19,12 +19,14 @@ if __package__ in (None, ""):
     from agents.config import Settings, load_settings
     from agents.logging_config import get_logger, setup_logging
     from agents.memory import LongTermMemoryStore
+    from agents.skills import SkillsLoader
     from agents.tools.runtime import build_tools
 else:
     from .agent import CyberCoreGraph, message_kind
     from .config import Settings, load_settings
     from .logging_config import get_logger, setup_logging
     from .memory import LongTermMemoryStore
+    from .skills import SkillsLoader
     from .tools.runtime import build_tools
 
 console = Console()
@@ -76,14 +78,22 @@ def run_cli(config_path: str = "configs/app.json") -> None:
     settings = load_settings(config_path=config_path)
     llm = build_llm(settings)
     memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
+    skills_loader = (
+        SkillsLoader(
+            workspace_skills_dir=settings.skills_workspace_dir,
+            builtin_skills_dir=settings.skills_builtin_dir or None,
+        )
+        if settings.enable_skills
+        else None
+    )
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
-        e2b_api_key=settings.e2b_api_key,
         tavily_api_key=settings.tavily_api_key,
         enable_exec_tool=settings.enable_exec_tool,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
+        extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
 
     logger.info("Initializing Postgres checkpointer")
@@ -99,6 +109,7 @@ def run_cli(config_path: str = "configs/app.json") -> None:
             retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
             checkpointer=checkpointer,
+            skills_loader=skills_loader,
         ).app
 
         logger.info("Graph ready, entering REPL loop")

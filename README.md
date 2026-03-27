@@ -79,11 +79,37 @@ Example MCP server config:
 ]
 ```
 
+## Skill mechanism
+
+This project now supports file-based skills with progressive loading:
+
+- Builtin skills: `src/agents/skills_catalog/<skill>/SKILL.md`
+- Workspace skills: `skills/<skill>/SKILL.md` (overrides builtin on same name)
+- `always: true` skills are injected into system prompt when requirements are met.
+- All skills are listed in a runtime summary, and the model can load full content on demand using `read_file`.
+
+Skill requirements are read from frontmatter metadata:
+
+- `metadata.requires.bins`
+- `metadata.requires.env`
+- `metadata.always` (or top-level `always`)
+
+Builtin `clawhub` skill is included for downloading skills via:
+
+- `npx --yes clawhub@latest ...`
+
+To use it, make sure:
+
+- `agent.enableExecTool=true` in config
+- host has `npx` available
+
 ## Key files
 
 - `src/agents/cli.py`: CLI runtime and Postgres checkpoint wiring.
 - `src/agents/agent.py`: LangGraph nodes and routing.
+- `src/agents/context.py`: system prompt assembly (memory + skills).
 - `src/agents/memory.py`: local `MEMORY.MD` long-term memory store.
+- `src/agents/skills.py`: skill discovery, availability checks, and summary rendering.
 - `src/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
 - `src/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
 - `configs/app.json`: unified app configuration (`agent + channels`).

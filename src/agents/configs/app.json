@@ -1,14 +1,14 @@
 {
   "agent": {
-    "dashscopeApiKey": "<your_dashscope_api_key>",
+    "dashscopeApiKey": "",
     "bailianBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "bailianModelName": "qwen-plus",
     "tavilyApiKey": "",
-    "postgresDsn": "postgresql://<user>:<password>@<host>:5432/<database>",
+    "postgresDsn": "",
     "milvusUri": "http://<host>:19530",
     "memoryCollection": "cybercore_long_term_memory_cli",
     "memoryFilePath": "MEMORY.MD",
-    "userId": "cli_user",
+    "userId": "feishu_bot",
     "sessionId": "",
     "sessionStateFilePath": ".cybercore_session.json",
     "retrieveTopK": 4,

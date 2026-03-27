@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -15,13 +18,6 @@ from langchain_core.tools import StructuredTool, tool
 from ..logging_config import get_logger
 from ..memory import LongTermMemoryStore
 
-try:
-    # Newer E2B SDK
-    from e2b_code_interpreter import Sandbox
-except ImportError:  # pragma: no cover - compatibility fallback
-    # Legacy E2B SDK
-    from e2b import Sandbox
-
 logger = get_logger(__name__)
 
 
@@ -29,14 +25,21 @@ def build_tools(
     *,
     memory_store: LongTermMemoryStore,
     user_id: str,
-    e2b_api_key: str,
     tavily_api_key: str,
     enable_exec_tool: bool,
     enable_cron_service: bool,
     mcp_servers: list[dict[str, Any]] | None,
+    extra_readonly_dirs: list[str] | None = None,
 ) -> list[Any]:
     logger.info("Building tools for user_id=%s", user_id)
     workspace_root = Path.cwd().resolve()
+    sandbox_root = workspace_root / ".sandbox"
+    readonly_roots = [workspace_root]
+    for candidate in extra_readonly_dirs or []:
+        try:
+            readonly_roots.append(Path(candidate).resolve())
+        except OSError:
+            logger.warning("Skip invalid readonly root: %s", candidate)
     tools: list[Any] = []
 
     @tool
@@ -44,7 +47,7 @@ def build_tools(
         """Read a text file from workspace. Supports line window via start_line/end_line."""
 
         try:
-            target = _resolve_workspace_path(path, workspace_root=workspace_root)
+            target = _resolve_read_path(path, readonly_roots=readonly_roots)
         except ValueError as exc:
             return str(exc)
         if not target.exists():
@@ -195,21 +198,10 @@ def build_tools(
 
     @tool
     def execute_python(code: str) -> str:
-        """Run Python code in E2B sandbox."""
+        """Run Python code in a local lightweight sandbox under workspace/.sandbox."""
 
-        logger.info("Executing Python code in E2B sandbox, code_len=%s", len(code))
-        sandbox = Sandbox(api_key=e2b_api_key)
-        execution = sandbox.run_code(code)
-
-        outputs: list[str] = []
-        for item in execution.logs.stdout:
-            outputs.append(item)
-        for item in execution.logs.stderr:
-            outputs.append(f"[stderr] {item}")
-        if execution.error:
-            outputs.append(f"[error] {execution.error.name}: {execution.error.value}")
-            logger.warning("E2B execution returned error: %s", execution.error.name)
-        return "\n".join(outputs) if outputs else "No output"
+        logger.info("Executing Python code in local sandbox, code_len=%s", len(code))
+        return _run_python_in_local_sandbox(code=code, sandbox_root=sandbox_root)
 
     @tool
     def save_memory(text: str, memory_type: str = "experience") -> str:
@@ -277,6 +269,84 @@ def _build_exec_tool(*, workspace_root: Path) -> StructuredTool:
         name="exec",
         description="Execute a shell command in local workspace.",
     )
+
+
+def _run_python_in_local_sandbox(*, code: str, sandbox_root: Path, timeout_sec: int = 15) -> str:
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+
+    script_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".py",
+            prefix="snippet_",
+            dir=str(sandbox_root),
+            delete=False,
+        ) as script_file:
+            script_file.write(code)
+            script_path = Path(script_file.name)
+
+        completed = subprocess.run(
+            [sys.executable, "-I", str(script_path)],
+            cwd=str(sandbox_root),
+            capture_output=True,
+            text=True,
+            timeout=max(1, timeout_sec),
+            env=_sandbox_env(sandbox_root),
+            preexec_fn=_sandbox_preexec_fn(),
+        )
+    except subprocess.TimeoutExpired:
+        return f"Execution timed out after {timeout_sec}s"
+    except Exception as exc:
+        logger.exception("Local sandbox execution failed")
+        return f"Execution failed: {type(exc).__name__}: {exc}"
+    finally:
+        if script_path and script_path.exists():
+            try:
+                script_path.unlink()
+            except OSError:
+                logger.warning("Failed to remove sandbox script: %s", script_path)
+
+    chunks: list[str] = [f"exit_code={completed.returncode}"]
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    if stdout:
+        chunks.append(f"stdout:\n{stdout}")
+    if stderr:
+        chunks.append(f"stderr:\n{stderr}")
+    if len(chunks) == 1:
+        chunks.append("No output")
+    return "\n\n".join(chunks)
+
+
+def _sandbox_env(sandbox_root: Path) -> dict[str, str]:
+    allowed = ["PATH", "LANG", "LC_ALL", "TZ"]
+    env = {k: v for k, v in os.environ.items() if k in allowed}
+    env["HOME"] = str(sandbox_root)
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def _sandbox_preexec_fn() -> Any | None:
+    # On Unix, add soft limits for CPU time and address space.
+    try:
+        import resource
+    except ImportError:
+        return None
+
+    def _set_limits() -> None:
+        try:
+            resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
+        except Exception:
+            pass
+        try:
+            # 512 MB virtual memory cap for lightweight isolation.
+            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+        except Exception:
+            pass
+
+    return _set_limits
 
 
 def _build_cron_tool(*, workspace_root: Path) -> StructuredTool:
@@ -456,6 +526,17 @@ def _resolve_workspace_path(path: str, *, workspace_root: Path) -> Path:
     if not _is_relative_to(resolved, workspace_root):
         raise ValueError(f"Path escapes workspace: {path}")
     return resolved
+
+
+def _resolve_read_path(path: str, *, readonly_roots: list[Path]) -> Path:
+    if not readonly_roots:
+        raise ValueError("No readonly roots configured")
+    candidate = Path(path)
+    resolved = candidate.resolve() if candidate.is_absolute() else (readonly_roots[0] / candidate).resolve()
+    for root in readonly_roots:
+        if _is_relative_to(resolved, root):
+            return resolved
+    raise ValueError(f"Path escapes readonly roots: {path}")
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:

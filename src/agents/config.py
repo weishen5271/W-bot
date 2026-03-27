@@ -18,7 +18,6 @@ class Settings:
     dashscope_api_key: str
     bailian_base_url: str
     bailian_model_name: str
-    e2b_api_key: str
     tavily_api_key: str
     postgres_dsn: str
     memory_file_path: str
@@ -29,6 +28,9 @@ class Settings:
     enable_exec_tool: bool
     enable_cron_service: bool
     mcp_servers: list[dict[str, Any]]
+    enable_skills: bool
+    skills_workspace_dir: str
+    skills_builtin_dir: str
 
 
 def load_settings(
@@ -57,7 +59,6 @@ def load_settings(
             "bailian_model_name",
             default="qwen-plus",
         ),
-        e2b_api_key=_string_value(merged, "e2bApiKey", "e2b_api_key", default=""),
         tavily_api_key=_string_value(merged, "tavilyApiKey", "tavily_api_key", default=""),
         postgres_dsn=_must_value(merged, "postgresDsn", "postgres_dsn"),
         memory_file_path=_string_value(
@@ -88,6 +89,19 @@ def load_settings(
             default=False,
         ),
         mcp_servers=_list_value(merged, "mcpServers", "mcp_servers", default=[]),
+        enable_skills=_bool_value(merged, "enableSkills", "enable_skills", default=True),
+        skills_workspace_dir=_string_value(
+            merged,
+            "skillsWorkspaceDir",
+            "skills_workspace_dir",
+            default="skills",
+        ),
+        skills_builtin_dir=_string_value(
+            merged,
+            "skillsBuiltinDir",
+            "skills_builtin_dir",
+            default="",
+        ),
     )
     logger.info(
         "Settings loaded from %s: model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
@@ -131,7 +145,6 @@ def default_app_config() -> dict[str, Any]:
             "dashscopeApiKey": "",
             "bailianBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "bailianModelName": "qwen-plus",
-            "e2bApiKey": "",
             "tavilyApiKey": "",
             "postgresDsn": "",
             "milvusUri": "http://<host>:19530",
@@ -144,6 +157,9 @@ def default_app_config() -> dict[str, Any]:
             "enableExecTool": False,
             "enableCronService": False,
             "mcpServers": [],
+            "enableSkills": True,
+            "skillsWorkspaceDir": "skills",
+            "skillsBuiltinDir": "",
         },
         "channels": {
             "feishu": {

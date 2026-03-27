@@ -10,7 +10,9 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from .logging_config import get_logger
+from .context import ContextBuilder
 from .memory import LongTermMemoryStore
+from .skills import SkillsLoader
 
 logger = get_logger(__name__)
 
@@ -30,6 +32,7 @@ class CyberCoreGraph:
         retrieve_top_k: int,
         user_id: str,
         checkpointer: Any,
+        skills_loader: SkillsLoader | None = None,
     ) -> None:
         logger.info(
             "Initializing CyberCoreGraph: user_id=%s, retrieve_top_k=%s",
@@ -40,6 +43,7 @@ class CyberCoreGraph:
         self._memory_store = memory_store
         self._retrieve_top_k = retrieve_top_k
         self._user_id = user_id
+        self._context_builder = ContextBuilder(skills_loader=skills_loader)
 
         graph_builder = StateGraph(AgentState)
         graph_builder.add_node("retrieve_memories", self._retrieve_memories)
@@ -104,7 +108,10 @@ class CyberCoreGraph:
             "工具调用参数必须严格匹配 schema。"
         )
         memory_context = state.get("long_term_context") or "无"
-        memory_block = f"已检索到的长期记忆:\n{memory_context}"
+        full_system_prompt = self._context_builder.build_system_prompt(
+            base_prompt=system_prompt,
+            memory_context=memory_context,
+        )
 
         history = state.get("messages", [])
         sanitized_history = sanitize_messages_for_llm(history)
@@ -116,8 +123,7 @@ class CyberCoreGraph:
             )
 
         messages: list[AnyMessage] = [
-            SystemMessage(content=system_prompt),
-            SystemMessage(content=memory_block),
+            SystemMessage(content=full_system_prompt),
             *sanitized_history,
         ]
         logger.debug("Invoking LLM with %s messages", len(messages))

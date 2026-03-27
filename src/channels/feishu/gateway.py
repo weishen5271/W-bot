@@ -15,6 +15,7 @@ from agents.agent import CyberCoreGraph
 from agents.config import default_app_config, load_settings
 from agents.logging_config import get_logger, setup_logging
 from agents.memory import LongTermMemoryStore
+from agents.skills import SkillsLoader
 from agents.tools.runtime import build_tools
 
 logger = get_logger(__name__)
@@ -396,14 +397,22 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
 
     llm = _build_llm(settings)
     memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
+    skills_loader = (
+        SkillsLoader(
+            workspace_skills_dir=settings.skills_workspace_dir,
+            builtin_skills_dir=settings.skills_builtin_dir or None,
+        )
+        if settings.enable_skills
+        else None
+    )
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
-        e2b_api_key=settings.e2b_api_key,
         tavily_api_key=settings.tavily_api_key,
         enable_exec_tool=settings.enable_exec_tool,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
+        extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
 
     with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
@@ -417,6 +426,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
             checkpointer=checkpointer,
+            skills_loader=skills_loader,
         ).app
 
         gateway = FeishuGateway(graph=graph, config=cfg.feishu, thread_prefix=cfg.thread_prefix)
