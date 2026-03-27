@@ -15,6 +15,8 @@ class InboundMedia:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """将输入转换为目标格式。
+        """
         return {
             "id": self.id,
             "path": self.path,
@@ -32,6 +34,8 @@ class InboundMessage:
     media: list[InboundMedia] = field(default_factory=list)
 
     def to_human_content(self) -> dict[str, Any]:
+        """将输入转换为目标格式。
+        """
         return {
             "text": self.content,
             "media": [item.to_dict() for item in self.media],

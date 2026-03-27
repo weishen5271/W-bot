@@ -15,10 +15,10 @@ class ProviderCapabilities:
 
 
 def resolve_provider_capabilities(*, model_name: str) -> ProviderCapabilities:
-    """Return best-effort capability defaults by model name.
-
-    This keeps a deterministic fallback path even if model capability metadata
-    is unavailable in runtime.
+    """处理resolve/provider/capabilities相关逻辑并返回结果。
+    
+    Args:
+        model_name: 当前使用的模型名称。
     """
 
     normalized = model_name.lower().strip()

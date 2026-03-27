@@ -5,6 +5,11 @@ from .skills import SkillsLoader
 
 class ContextBuilder:
     def __init__(self, *, skills_loader: SkillsLoader | None = None) -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            skills_loader: 技能加载器实例，用于读取 always 技能和技能摘要。
+        """
         self._skills_loader = skills_loader
 
     def build_system_prompt(
@@ -12,8 +17,18 @@ class ContextBuilder:
         *,
         base_prompt: str,
         memory_context: str,
+        conversation_summary: str = "",
     ) -> str:
+        """组装系统提示词，合并基础提示、记忆和技能上下文。
+        
+        Args:
+            base_prompt: 基础系统提示词模板。
+            memory_context: 已检索的长期记忆文本。
+            conversation_summary: 历史对话压缩后的摘要文本。
+        """
         blocks: list[str] = [base_prompt.strip(), f"已检索到的长期记忆:\n{memory_context or '无'}"]
+        if conversation_summary.strip():
+            blocks.append(f"会话摘要（历史压缩）:\n{conversation_summary.strip()}")
 
         if self._skills_loader is None:
             return "\n\n".join(blocks)
@@ -31,12 +46,9 @@ class ContextBuilder:
         summary = self._skills_loader.build_skills_summary()
         blocks.append(
             "可用 Skill 摘要如下。"
-            "执行规则："
-            "A) 先检查是否有与用户请求匹配的可用 skill；"
-            "B) 若用户显式点名 skill，且该 skill 可用，必须优先使用；"
-            "C) 命中后先使用 read_file 读取对应 SKILL.md 全文，再按其步骤执行；"
-            "D) 若多个 skill 同时命中，选择最小必要集合，不做无关 skill 扩展；"
-            "E) 若未命中或不可用，在最终答复里说明未使用原因。\n"
+            "规则：优先用户点名 skill；否则按意图匹配最小必要 skill；"
+            "命中后先 read_file 读取 SKILL.md 全文再执行；"
+            "未使用 skill 时在答复中给一句原因。\n"
             f"{summary}"
         )
         return "\n\n".join(blocks)

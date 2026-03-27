@@ -35,9 +35,16 @@ logger = get_logger(__name__)
 
 class SessionStateStore:
     def __init__(self, file_path: str) -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            file_path: 文件路径对象或路径字符串。
+        """
         self._file_path = file_path
 
     def load(self) -> str | None:
+        """加载目标配置或数据并返回。
+        """
         if not os.path.exists(self._file_path):
             return None
 
@@ -54,6 +61,11 @@ class SessionStateStore:
         return None
 
     def save(self, session_id: str) -> None:
+        """保存数据到持久化存储。
+        
+        Args:
+            session_id: 业务对象唯一标识。
+        """
         folder = os.path.dirname(os.path.abspath(self._file_path))
         if folder and not os.path.exists(folder):
             os.makedirs(folder, exist_ok=True)
@@ -63,6 +75,11 @@ class SessionStateStore:
 
 
 def run_cli(config_path: str = "configs/app.json") -> None:
+    """执行主流程并返回处理结果。
+    
+    Args:
+        config_path: 目标路径参数，用于定位文件或目录。
+    """
     setup_logging()
     logger.info("Starting W-bot CLI runtime")
 
@@ -126,6 +143,7 @@ def run_cli(config_path: str = "configs/app.json") -> None:
             llm_audio=llm_audio,
             image_model_name=settings.model_routing.image_model_name,
             audio_model_name=settings.model_routing.audio_model_name,
+            token_optimization_settings=settings.token_optimization,
         ).app
 
         logger.info("Graph ready, entering REPL loop")
@@ -133,6 +151,12 @@ def run_cli(config_path: str = "configs/app.json") -> None:
 
 
 def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
+    """构建并返回目标对象。
+    
+    Args:
+        settings: 全局设置对象。
+        model_name: 当前使用的模型名称。
+    """
     return ChatOpenAI(
         model=model_name,
         api_key=settings.dashscope_api_key,
@@ -142,6 +166,12 @@ def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
 
 
 def _repl(graph: Any, settings: Settings) -> None:
+    """处理repl相关逻辑并返回结果。
+    
+    Args:
+        graph: 对话图执行器实例。
+        settings: 全局设置对象。
+    """
     console.print("[bold cyan]W-bot CLI[/bold cyan] | type quit/exit to leave")
 
     session_store = SessionStateStore(settings.session_state_file_path)
@@ -204,6 +234,13 @@ def _render_existing_session_history(
     session_id: str,
     seen_message_ids: set[str],
 ) -> None:
+    """将数据渲染为目标文本或展示格式。
+    
+    Args:
+        graph: 对话图执行器实例。
+        session_id: 业务对象唯一标识。
+        seen_message_ids: 消息相关参数，用于定位或处理消息。
+    """
     config = {"configurable": {"thread_id": session_id}}
     try:
         snapshot = graph.get_state(config)
@@ -225,6 +262,11 @@ def _render_existing_session_history(
 
 
 def _render_message(message: Any) -> None:
+    """将数据渲染为目标文本或展示格式。
+    
+    Args:
+        message: 单条消息对象。
+    """
     kind = message_kind(message)
     title = {
         "thought": "Thought",

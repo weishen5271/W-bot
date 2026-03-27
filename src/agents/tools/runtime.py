@@ -31,6 +31,17 @@ def build_tools(
     mcp_servers: list[dict[str, Any]] | None,
     extra_readonly_dirs: list[str] | None = None,
 ) -> list[Any]:
+    """构建并返回目标对象。
+    
+    Args:
+        memory_store: 长期记忆存储实例，用于检索与保存记忆。
+        user_id: 业务对象唯一标识。
+        tavily_api_key: Tavily 搜索服务 API Key。
+        enable_exec_tool: 是否启用本地执行工具。
+        enable_cron_service: 是否启用定时服务工具。
+        mcp_servers: MCP 服务配置列表。
+        extra_readonly_dirs: 额外只读目录列表。
+    """
     logger.info("Building tools for user_id=%s", user_id)
     workspace_root = Path.cwd().resolve()
     sandbox_root = workspace_root / ".sandbox"
@@ -44,7 +55,13 @@ def build_tools(
 
     @tool
     def read_file(path: str, start_line: int = 1, end_line: int = 300) -> str:
-        """Read a text file from workspace. Supports line window via start_line/end_line."""
+        """处理read/file相关逻辑并返回结果。
+        
+        Args:
+            path: 文件路径。
+            start_line: 读取片段的起始行号。
+            end_line: 读取片段的结束行号。
+        """
 
         try:
             target = _resolve_read_path(path, readonly_roots=readonly_roots)
@@ -63,7 +80,13 @@ def build_tools(
 
     @tool
     def write_file(path: str, content: str, overwrite: bool = True) -> str:
-        """Write text file in workspace. Creates parent directories automatically."""
+        """处理write/file相关逻辑并返回结果。
+        
+        Args:
+            path: 文件路径。
+            content: 消息内容主体。
+            overwrite: 是否覆盖已有内容。
+        """
 
         try:
             target = _resolve_workspace_path(path, workspace_root=workspace_root)
@@ -77,7 +100,14 @@ def build_tools(
 
     @tool
     def edit_file(path: str, find_text: str, replace_text: str, replace_all: bool = False) -> str:
-        """Edit file by replacing text."""
+        """处理edit/file相关逻辑并返回结果。
+        
+        Args:
+            path: 文件路径。
+            find_text: 文本参数，作为本次处理的输入内容。
+            replace_text: 文本参数，作为本次处理的输入内容。
+            replace_all: 是否替换全部匹配项。
+        """
 
         try:
             target = _resolve_workspace_path(path, workspace_root=workspace_root)
@@ -99,7 +129,12 @@ def build_tools(
 
     @tool
     def list_dir(path: str = ".", recursive: bool = False) -> str:
-        """List files/directories under workspace path."""
+        """处理list/dir相关逻辑并返回结果。
+        
+        Args:
+            path: 文件路径。
+            recursive: 是否递归扫描子目录。
+        """
 
         try:
             target = _resolve_workspace_path(path, workspace_root=workspace_root)
@@ -124,7 +159,12 @@ def build_tools(
 
     @tool
     def web_search(query: str, max_results: int = 5) -> str:
-        """Search the web via Tavily and return brief results."""
+        """处理web/search相关逻辑并返回结果。
+        
+        Args:
+            query: 检索查询文本。
+            max_results: 数值限制参数，用于控制处理规模。
+        """
 
         if not tavily_api_key:
             return "TAVILY_API_KEY is not configured."
@@ -158,7 +198,12 @@ def build_tools(
 
     @tool
     def web_fetch(url: str, max_chars: int = 8000) -> str:
-        """Fetch a URL and return a cleaned text excerpt."""
+        """处理web/fetch相关逻辑并返回结果。
+        
+        Args:
+            url: HTTP 请求地址。
+            max_chars: 返回文本片段允许的最大字符数。
+        """
 
         req = url_request.Request(url, headers={"User-Agent": "W-bot/1.0"})
         try:
@@ -171,7 +216,12 @@ def build_tools(
 
     @tool
     def message(recipient: str, content: str) -> str:
-        """Send an internal message to a named recipient queue."""
+        """处理message相关逻辑并返回结果。
+        
+        Args:
+            recipient: 消息接收方标识。
+            content: 消息内容主体。
+        """
 
         msg = {
             "id": uuid.uuid4().hex,
@@ -184,7 +234,12 @@ def build_tools(
 
     @tool
     def spawn(task: str, context: str = "") -> str:
-        """Create a child task record for later processing."""
+        """处理spawn相关逻辑并返回结果。
+        
+        Args:
+            task: 任务描述文本。
+            context: 文本参数，作为本次处理的输入内容。
+        """
 
         job = {
             "id": uuid.uuid4().hex,
@@ -198,14 +253,23 @@ def build_tools(
 
     @tool
     def execute_python(code: str) -> str:
-        """Run Python code in a local lightweight sandbox under workspace/.sandbox."""
+        """处理execute/python相关逻辑并返回结果。
+        
+        Args:
+            code: 待执行的 Python 代码。
+        """
 
         logger.info("Executing Python code in local sandbox, code_len=%s", len(code))
         return _run_python_in_local_sandbox(code=code, sandbox_root=sandbox_root)
 
     @tool
     def save_memory(text: str, memory_type: str = "experience") -> str:
-        """Persist long-term memory."""
+        """保存数据到持久化存储。
+        
+        Args:
+            text: 待处理文本。
+            memory_type: 类型标识参数，用于选择处理策略。
+        """
 
         doc_id = memory_store.save(user_id=user_id, text=text, memory_type=memory_type)
         if not doc_id:
@@ -240,8 +304,18 @@ def build_tools(
 
 
 def _build_exec_tool(*, workspace_root: Path) -> StructuredTool:
+    """构建并返回目标对象。
+    
+    Args:
+        workspace_root: 工作区根目录路径。
+    """
     def _exec(command: str, timeout_sec: int = 30) -> str:
-        """Execute shell command in workspace."""
+        """处理exec相关逻辑并返回结果。
+        
+        Args:
+            command: 待执行的命令字符串。
+            timeout_sec: 请求超时时间（秒）。
+        """
 
         try:
             completed = subprocess.run(
@@ -272,6 +346,13 @@ def _build_exec_tool(*, workspace_root: Path) -> StructuredTool:
 
 
 def _run_python_in_local_sandbox(*, code: str, sandbox_root: Path, timeout_sec: int = 15) -> str:
+    """处理run/python/in/local/sandbox相关逻辑并返回结果。
+    
+    Args:
+        code: 待执行的 Python 代码。
+        sandbox_root: 沙箱根目录。
+        timeout_sec: 请求超时时间（秒）。
+    """
     sandbox_root.mkdir(parents=True, exist_ok=True)
 
     script_path: Path | None = None
@@ -321,6 +402,11 @@ def _run_python_in_local_sandbox(*, code: str, sandbox_root: Path, timeout_sec: 
 
 
 def _sandbox_env(sandbox_root: Path) -> dict[str, str]:
+    """处理sandbox/env相关逻辑并返回结果。
+    
+    Args:
+        sandbox_root: 沙箱根目录。
+    """
     allowed = ["PATH", "LANG", "LC_ALL", "TZ"]
     env = {k: v for k, v in os.environ.items() if k in allowed}
     env["HOME"] = str(sandbox_root)
@@ -330,12 +416,16 @@ def _sandbox_env(sandbox_root: Path) -> dict[str, str]:
 
 def _sandbox_preexec_fn() -> Any | None:
     # On Unix, add soft limits for CPU time and address space.
+    """处理sandbox/preexec/fn相关逻辑并返回结果。
+    """
     try:
         import resource
     except ImportError:
         return None
 
     def _set_limits() -> None:
+        """处理set/limits相关逻辑并返回结果。
+        """
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
         except Exception:
@@ -350,13 +440,25 @@ def _sandbox_preexec_fn() -> Any | None:
 
 
 def _build_cron_tool(*, workspace_root: Path) -> StructuredTool:
+    """构建并返回目标对象。
+    
+    Args:
+        workspace_root: 工作区根目录路径。
+    """
     def _cron(
         action: str,
         task_name: str,
         schedule: str = "",
         payload: str = "",
     ) -> str:
-        """Manage simple cron task records when cron service is enabled."""
+        """处理cron相关逻辑并返回结果。
+        
+        Args:
+            action: 定时任务执行动作。
+            task_name: 名称参数，用于标识目标对象。
+            schedule: 任务调度配置。
+            payload: 输入载荷字典，包含请求字段与元数据。
+        """
 
         jobs_file = workspace_root / ".w_bot_cron_jobs.json"
         jobs = _read_json_file(jobs_file, default=[])
@@ -396,6 +498,11 @@ def _build_cron_tool(*, workspace_root: Path) -> StructuredTool:
 
 
 def _build_mcp_tools(mcp_servers: list[dict[str, Any]]) -> list[StructuredTool]:
+    """构建并返回目标对象。
+    
+    Args:
+        mcp_servers: MCP 服务配置列表。
+    """
     tools: list[StructuredTool] = []
     for server in mcp_servers:
         if not isinstance(server, dict):
@@ -439,8 +546,22 @@ def _make_mcp_tool(
     remote_tool_name: str,
     headers: dict[str, Any],
 ) -> StructuredTool:
+    """处理make/mcp/tool相关逻辑并返回结果。
+    
+    Args:
+        full_name: 名称参数，用于标识目标对象。
+        description: 描述文本，用于记录或展示。
+        base_url: 地址参数，用于请求远端资源。
+        invoke_path_template: 目标路径参数，用于定位文件或目录。
+        remote_tool_name: 名称参数，用于标识目标对象。
+        headers: HTTP 请求头字典。
+    """
     def _call(arguments_json: str = "{}") -> str:
-        """Call MCP tool with JSON arguments."""
+        """处理call相关逻辑并返回结果。
+        
+        Args:
+            arguments_json: 工具参数 JSON 字符串。
+        """
 
         try:
             arguments = json.loads(arguments_json or "{}")
@@ -459,6 +580,13 @@ def _make_mcp_tool(
 
 
 def _discover_mcp_tools(*, base_url: str, discovery_path: str, headers: dict[str, Any]) -> list[dict[str, str]]:
+    """处理discover/mcp/tools相关逻辑并返回结果。
+    
+    Args:
+        base_url: 地址参数，用于请求远端资源。
+        discovery_path: 目标路径参数，用于定位文件或目录。
+        headers: HTTP 请求头字典。
+    """
     url = f"{base_url}{discovery_path}"
     raw = _http_get_json(url=url, headers=headers, timeout=10)
     if isinstance(raw, str):
@@ -490,6 +618,13 @@ def _http_get_json(
     headers: dict[str, Any] | None = None,
     timeout: int = 10,
 ) -> dict[str, Any] | str:
+    """处理http/get/json相关逻辑并返回结果。
+    
+    Args:
+        url: HTTP 请求地址。
+        headers: HTTP 请求头字典。
+        timeout: 请求超时时间（秒）。
+    """
     req_headers = {"User-Agent": "W-bot/1.0"}
     if headers:
         req_headers.update({str(k): str(v) for k, v in headers.items()})
@@ -508,6 +643,14 @@ def _http_post_json(
     headers: dict[str, Any] | None = None,
     timeout: int = 10,
 ) -> dict[str, Any] | str:
+    """处理http/post/json相关逻辑并返回结果。
+    
+    Args:
+        url: HTTP 请求地址。
+        payload: 输入载荷字典，包含请求字段与元数据。
+        headers: HTTP 请求头字典。
+        timeout: 请求超时时间（秒）。
+    """
     body = json.dumps(payload).encode("utf-8")
     req_headers = {"Content-Type": "application/json", "User-Agent": "W-bot/1.0"}
     if headers:
@@ -521,6 +664,12 @@ def _http_post_json(
 
 
 def _resolve_workspace_path(path: str, *, workspace_root: Path) -> Path:
+    """处理resolve/workspace/path相关逻辑并返回结果。
+    
+    Args:
+        path: 文件路径。
+        workspace_root: 工作区根目录路径。
+    """
     candidate = Path(path)
     resolved = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
     if not _is_relative_to(resolved, workspace_root):
@@ -529,6 +678,12 @@ def _resolve_workspace_path(path: str, *, workspace_root: Path) -> Path:
 
 
 def _resolve_read_path(path: str, *, readonly_roots: list[Path]) -> Path:
+    """处理resolve/read/path相关逻辑并返回结果。
+    
+    Args:
+        path: 文件路径。
+        readonly_roots: 只读目录白名单。
+    """
     if not readonly_roots:
         raise ValueError("No readonly roots configured")
     candidate = Path(path)
@@ -540,6 +695,12 @@ def _resolve_read_path(path: str, *, readonly_roots: list[Path]) -> Path:
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
+    """判断条件是否满足。
+    
+    Args:
+        path: 文件路径。
+        base: 基准路径或基准配置对象。
+    """
     try:
         path.relative_to(base)
         return True
@@ -548,11 +709,21 @@ def _is_relative_to(path: Path, base: Path) -> bool:
 
 
 def _sanitize_tool_token(value: str) -> str:
+    """处理sanitize/tool/token相关逻辑并返回结果。
+    
+    Args:
+        value: 待转换或校验的值。
+    """
     cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", value).strip("_").lower()
     return cleaned or "tool"
 
 
 def _strip_html(raw: str) -> str:
+    """处理strip/html相关逻辑并返回结果。
+    
+    Args:
+        raw: 原始输入内容。
+    """
     without_script = re.sub(r"<script[\s\S]*?</script>", " ", raw, flags=re.IGNORECASE)
     without_style = re.sub(r"<style[\s\S]*?</style>", " ", without_script, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", without_style)
@@ -561,6 +732,12 @@ def _strip_html(raw: str) -> str:
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    """处理append/jsonl相关逻辑并返回结果。
+    
+    Args:
+        path: 文件路径。
+        payload: 输入载荷字典，包含请求字段与元数据。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False))
@@ -568,6 +745,12 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _read_json_file(path: Path, *, default: Any) -> Any:
+    """处理read/json/file相关逻辑并返回结果。
+    
+    Args:
+        path: 文件路径。
+        default: 缺失配置时使用的默认值。
+    """
     if not path.exists():
         return default
     try:

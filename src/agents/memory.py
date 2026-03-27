@@ -36,12 +36,24 @@ SECTION_PLACEHOLDERS = {
 
 class LongTermMemoryStore:
     def __init__(self, memory_file_path: str = "MEMORY.MD") -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            memory_file_path: 目标路径参数，用于定位文件或目录。
+        """
         self._memory_file_path = memory_file_path
         self._lock = threading.Lock()
         logger.info("Initializing local long-term memory store: file=%s", memory_file_path)
         self._ensure_file_exists()
 
     def retrieve(self, user_id: str, query: str, k: int = 4) -> list[Document]:
+        """检索并返回匹配结果。
+        
+        Args:
+            user_id: 业务对象唯一标识。
+            query: 检索查询文本。
+            k: 候选返回数量上限。
+        """
         logger.debug(
             "Retrieving long-term memories from file: user_id=%s, k=%s", user_id, k
         )
@@ -70,6 +82,12 @@ class LongTermMemoryStore:
         return docs
 
     def retrieve_recent(self, user_id: str, k: int = 4) -> list[Document]:
+        """检索并返回匹配结果。
+        
+        Args:
+            user_id: 业务对象唯一标识。
+            k: 候选返回数量上限。
+        """
         logger.debug("Retrieving recent long-term memories: user_id=%s, k=%s", user_id, k)
         with self._lock:
             sections = self._read_sections()
@@ -93,6 +111,13 @@ class LongTermMemoryStore:
         return docs
 
     def save(self, user_id: str, text: str, memory_type: str = "experience") -> str:
+        """保存数据到持久化存储。
+        
+        Args:
+            user_id: 业务对象唯一标识。
+            text: 待处理文本。
+            memory_type: 类型标识参数，用于选择处理策略。
+        """
         clean_text = " ".join((text or "").strip().split())
         if not clean_text:
             logger.warning("Skip saving memory: empty text")
@@ -122,6 +147,8 @@ class LongTermMemoryStore:
         return _stable_id(entry)
 
     def _ensure_file_exists(self) -> None:
+        """处理ensure/file/exists相关逻辑并返回结果。
+        """
         memory_file = self._memory_file_path
         folder = os.path.dirname(os.path.abspath(memory_file))
         if folder and not os.path.exists(folder):
@@ -135,6 +162,8 @@ class LongTermMemoryStore:
             f.write(_render_template({name: [] for name in SECTION_ORDER}))
 
     def _read_sections(self) -> dict[str, list[str]]:
+        """处理read/sections相关逻辑并返回结果。
+        """
         self._ensure_file_exists()
         with open(self._memory_file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -154,6 +183,11 @@ class LongTermMemoryStore:
         return sections
 
     def _write_sections(self, sections: dict[str, list[str]]) -> None:
+        """处理write/sections相关逻辑并返回结果。
+        
+        Args:
+            sections: 内存文档分段列表。
+        """
         with open(self._memory_file_path, "w", encoding="utf-8") as f:
             f.write(_render_template(sections))
 
@@ -162,6 +196,12 @@ class LongTermMemoryStore:
         sections: dict[str, list[str]],
         max_items_per_section: int,
     ) -> None:
+        """处理compress/sections相关逻辑并返回结果。
+        
+        Args:
+            sections: 内存文档分段列表。
+            max_items_per_section: 数值限制参数，用于控制处理规模。
+        """
         for section in SECTION_ORDER:
             items = sections.get(section, [])
             if len(items) <= max_items_per_section:
@@ -170,6 +210,11 @@ class LongTermMemoryStore:
 
 
 def _render_template(sections: dict[str, list[str]]) -> str:
+    """将数据渲染为目标文本或展示格式。
+    
+    Args:
+        sections: 内存文档分段列表。
+    """
     lines: list[str] = [HEADER, "", DESCRIPTION, ""]
     for section in SECTION_ORDER:
         lines.append(f"## {section}")
@@ -185,6 +230,11 @@ def _render_template(sections: dict[str, list[str]]) -> str:
 
 
 def _map_section(memory_type: str) -> str:
+    """处理map/section相关逻辑并返回结果。
+    
+    Args:
+        memory_type: 类型标识参数，用于选择处理策略。
+    """
     key = (memory_type or "").strip().lower()
     if key in {"preference", "preferences"}:
         return "Preferences"
@@ -196,6 +246,12 @@ def _map_section(memory_type: str) -> str:
 
 
 def _score_text(text: str, query: str) -> int:
+    """处理score/text相关逻辑并返回结果。
+    
+    Args:
+        text: 待处理文本。
+        query: 检索查询文本。
+    """
     query = (query or "").strip()
     if not query:
         return 0
@@ -212,13 +268,28 @@ def _score_text(text: str, query: str) -> int:
 
 
 def _tokenize(text: str) -> list[str]:
+    """处理tokenize相关逻辑并返回结果。
+    
+    Args:
+        text: 待处理文本。
+    """
     raw_tokens = re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z0-9_]+", text.lower())
     return [token for token in raw_tokens if len(token) >= 2]
 
 
 def _normalize(text: str) -> str:
+    """将输入标准化为统一结构。
+    
+    Args:
+        text: 待处理文本。
+    """
     return " ".join(text.strip().lower().split())
 
 
 def _stable_id(text: str) -> str:
+    """处理stable/id相关逻辑并返回结果。
+    
+    Args:
+        text: 待处理文本。
+    """
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]

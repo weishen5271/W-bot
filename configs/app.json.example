@@ -34,6 +34,12 @@
       "documentMaxChars": 120000,
       "tempTtlHours": 24,
       "mediaRootDir": "media"
+    },
+    "tokenOptimization": {
+      "enabled": true,
+      "maxRecentUserTurns": 6,
+      "summaryTriggerMessages": 12,
+      "summaryMaxChars": 1200
     }
   },
   "channels": {

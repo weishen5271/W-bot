@@ -17,7 +17,13 @@
     "mcpServers": [],
     "enableSkills": true,
     "skillsWorkspaceDir": "skills",
-    "skillsBuiltinDir": ""
+    "skillsBuiltinDir": "",
+    "tokenOptimization": {
+      "enabled": true,
+      "maxRecentUserTurns": 6,
+      "summaryTriggerMessages": 12,
+      "summaryMaxChars": 1200
+    }
   },
   "channels": {
     "feishu": {

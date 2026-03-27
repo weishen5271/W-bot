@@ -29,6 +29,11 @@ _DOC_EXTS = {
 
 
 def file_sha256(path: str) -> str:
+    """计算指定文件的 SHA256 摘要，便于做内容去重和完整性校验。
+    
+    Args:
+        path: 文件路径。
+    """
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -37,6 +42,12 @@ def file_sha256(path: str) -> str:
 
 
 def detect_mime(path: str, hinted_mime: str = "") -> str:
+    """根据显式提示和文件后缀推断文件的 MIME 类型。
+    
+    Args:
+        path: 文件路径。
+        hinted_mime: 上游提供的 MIME 类型提示；有值时优先使用。
+    """
     if hinted_mime:
         return hinted_mime
 
@@ -57,6 +68,13 @@ def detect_mime(path: str, hinted_mime: str = "") -> str:
 
 
 def classify_kind(*, path: str, mime: str, hinted_kind: str = "") -> str:
+    """结合 MIME 与文件后缀将媒体归类为 image/audio/video/document/other。
+    
+    Args:
+        path: 文件路径。
+        mime: 媒体 MIME 类型。
+        hinted_kind: 上游提供的媒体类型提示。
+    """
     if hinted_kind in {"image", "audio", "video", "document", "other"}:
         return hinted_kind
 
@@ -81,12 +99,24 @@ def classify_kind(*, path: str, mime: str, hinted_kind: str = "") -> str:
 
 
 def to_data_url(*, path: str, mime: str) -> str:
+    """读取本地文件并编码为 data URL 字符串。
+    
+    Args:
+        path: 文件路径。
+        mime: 媒体 MIME 类型。
+    """
     raw = Path(path).read_bytes()
     encoded = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{encoded}"
 
 
 def read_text_excerpt(*, path: str, max_chars: int) -> str:
+    """读取文本文件并按最大字符数截断，返回可预览的片段。
+    
+    Args:
+        path: 文件路径。
+        max_chars: 返回文本片段允许的最大字符数。
+    """
     raw = Path(path).read_text(encoding="utf-8", errors="ignore")
     if len(raw) <= max_chars:
         return raw
@@ -94,6 +124,11 @@ def read_text_excerpt(*, path: str, max_chars: int) -> str:
 
 
 def to_media_item(payload: dict[str, object]) -> MediaItem | None:
+    """将入参字典转换为标准化的 MediaItem 对象。
+    
+    Args:
+        payload: 输入载荷字典，包含请求字段与元数据。
+    """
     path = str(payload.get("path") or "").strip()
     if not path:
         return None

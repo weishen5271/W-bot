@@ -41,6 +41,11 @@ class FeishuConfig:
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "FeishuConfig":
+        """从输入数据构建目标对象。
+        
+        Args:
+            payload: 输入载荷字典，包含请求字段与元数据。
+        """
         return FeishuConfig(
             enabled=bool(_pick(payload, "enabled", default=False)),
             app_id=str(_pick(payload, "appId", "app_id", default="")).strip(),
@@ -73,6 +78,14 @@ class FeishuGateway:
         thread_prefix: str,
         media_root_dir: str = "media",
     ) -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            graph: 对话图执行器实例。
+            config: 配置对象或配置字典。
+            thread_prefix: 线程前缀，用于生成会话 thread_id。
+            media_root_dir: 媒体文件落盘根目录。
+        """
         self._graph = graph
         self._config = config
         self._thread_prefix = thread_prefix
@@ -89,6 +102,8 @@ class FeishuGateway:
         self._media_root.mkdir(parents=True, exist_ok=True)
 
     def start(self) -> None:
+        """启动对应服务或流程。
+        """
         if not self._config.enabled:
             logger.warning("Feishu channel is disabled by config")
             return
@@ -133,12 +148,22 @@ class FeishuGateway:
                 time.sleep(5)
 
     def _on_message(self, data: Any) -> None:
+        """处理事件回调并分发到内部处理逻辑。
+        
+        Args:
+            data: 飞书事件回调原始对象。
+        """
         try:
             self._handle_message(data)
         except Exception:
             logger.exception("Failed to handle Feishu inbound message")
 
     def _handle_message(self, data: Any) -> None:
+        """处理指定输入并执行业务分支。
+        
+        Args:
+            data: 已接收的飞书消息事件对象。
+        """
         payload = self._as_dict(data)
         event = payload.get("event", payload)
         if not isinstance(event, dict):
@@ -219,6 +244,12 @@ class FeishuGateway:
         )
 
     def _ask_agent(self, *, inbound: InboundMessage, session_id: str) -> str:
+        """处理ask/agent相关逻辑并返回结果。
+        
+        Args:
+            inbound: 归一化后的入站消息对象。
+            session_id: 业务对象唯一标识。
+        """
         config = {"configurable": {"thread_id": session_id}}
         media_payload = [item.to_dict() for item in inbound.media]
         prompt_text = _build_inbound_prompt_text(inbound)
@@ -253,6 +284,14 @@ class FeishuGateway:
         text: str,
         reply_to_message_id: str,
     ) -> None:
+        """处理send/text相关逻辑并返回结果。
+        
+        Args:
+            chat_id: 聊天会话 ID。
+            open_id: 业务对象唯一标识。
+            text: 待处理文本。
+            reply_to_message_id: 业务对象唯一标识。
+        """
         if self._client is None or self._lark is None:
             return
 
@@ -270,6 +309,13 @@ class FeishuGateway:
         self._create_message(receive_id_type=receive_id_type, receive_id=receive_id, content=content)
 
     def _create_message(self, *, receive_id_type: str, receive_id: str, content: str) -> None:
+        """处理create/message相关逻辑并返回结果。
+        
+        Args:
+            receive_id_type: 接收方 ID 类型（如 chat_id、open_id）。
+            receive_id: 业务对象唯一标识。
+            content: 消息内容主体。
+        """
         assert self._lark is not None
         assert self._client is not None
 
@@ -292,6 +338,12 @@ class FeishuGateway:
             raise RuntimeError(f"send failed: {self._response_summary(response)}")
 
     def _reply_message(self, *, message_id: str, content: str) -> None:
+        """处理reply/message相关逻辑并返回结果。
+        
+        Args:
+            message_id: 消息唯一 ID。
+            content: 消息内容主体。
+        """
         assert self._lark is not None
         assert self._client is not None
 
@@ -303,6 +355,12 @@ class FeishuGateway:
             raise RuntimeError(f"reply failed: {self._response_summary(response)}")
 
     def _add_reaction(self, *, message_id: str, emoji_type: str) -> None:
+        """处理add/reaction相关逻辑并返回结果。
+        
+        Args:
+            message_id: 消息唯一 ID。
+            emoji_type: 要添加的表情反应类型。
+        """
         if self._client is None or self._lark is None:
             return
 
@@ -325,6 +383,11 @@ class FeishuGateway:
 
     @staticmethod
     def _response_ok(response: Any) -> bool:
+        """处理response/ok相关逻辑并返回结果。
+        
+        Args:
+            response: HTTP 响应对象。
+        """
         if response is None:
             return False
         if hasattr(response, "success") and callable(response.success):
@@ -342,6 +405,11 @@ class FeishuGateway:
 
     @staticmethod
     def _response_summary(response: Any) -> str:
+        """处理response/summary相关逻辑并返回结果。
+        
+        Args:
+            response: HTTP 响应对象。
+        """
         if response is None:
             return "response=None"
         code = getattr(response, "code", None)
@@ -359,6 +427,11 @@ class FeishuGateway:
         return f"code={code}, msg={msg}"
 
     def _is_duplicate(self, message_id: str) -> bool:
+        """判断条件是否满足。
+        
+        Args:
+            message_id: 消息唯一 ID。
+        """
         with self._seen_lock:
             if message_id in self._seen_message_ids:
                 return True
@@ -368,6 +441,11 @@ class FeishuGateway:
         return False
 
     def _is_allowed(self, open_id: str) -> bool:
+        """判断条件是否满足。
+        
+        Args:
+            open_id: 业务对象唯一标识。
+        """
         allow = self._config.allow_from
         if not allow:
             return False
@@ -377,6 +455,11 @@ class FeishuGateway:
 
     @staticmethod
     def _is_new_session_command(text: str) -> bool:
+        """判断条件是否满足。
+        
+        Args:
+            text: 待处理文本。
+        """
         normalized = text.strip().lower()
         if normalized == "/new":
             return True
@@ -384,6 +467,12 @@ class FeishuGateway:
 
     @staticmethod
     def _extract_text(*, content_raw: Any, message_type: str) -> str:
+        """从输入中提取所需信息。
+        
+        Args:
+            content_raw: 原始内容字段（通常为 JSON 字符串）。
+            message_type: 消息类型标识。
+        """
         if not isinstance(content_raw, str) or not content_raw.strip():
             return ""
 
@@ -410,6 +499,13 @@ class FeishuGateway:
         message_type: str,
         content_raw: Any,
     ) -> list[InboundMedia]:
+        """从输入中提取所需信息。
+        
+        Args:
+            message_id: 消息唯一 ID。
+            message_type: 消息类型标识。
+            content_raw: 原始内容字段（通常为 JSON 字符串）。
+        """
         if not isinstance(content_raw, str) or not content_raw.strip():
             return []
 
@@ -492,6 +588,16 @@ class FeishuGateway:
         kind: str,
         meta: dict[str, Any],
     ) -> InboundMedia | None:
+        """处理download/media/item相关逻辑并返回结果。
+        
+        Args:
+            message_id: 消息唯一 ID。
+            resource_key: 飞书资源标识，用于下载媒体文件。
+            resource_type: 飞书资源类型（如 image/file/audio/video）。
+            suggested_name: 建议使用的文件名。
+            kind: 媒体类型标识。
+            meta: 补充元数据字典。
+        """
         token = self._fetch_app_access_token()
         if not token:
             logger.warning("Cannot download media because app access token is unavailable")
@@ -524,6 +630,8 @@ class FeishuGateway:
         )
 
     def _fetch_app_access_token(self) -> str:
+        """处理fetch/app/access/token相关逻辑并返回结果。
+        """
         url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
         payload = {
             "app_id": self._config.app_id,
@@ -563,6 +671,14 @@ class FeishuGateway:
         resource_type: str,
         access_token: str,
     ) -> tuple[bytes | None, str]:
+        """处理download/message/resource相关逻辑并返回结果。
+        
+        Args:
+            message_id: 消息唯一 ID。
+            resource_key: 飞书资源标识，用于下载媒体文件。
+            resource_type: 飞书资源类型（如 image/file/audio/video）。
+            access_token: 飞书接口访问令牌。
+        """
         encoded_key = urllib.parse.quote(resource_key, safe="")
         encoded_message_id = urllib.parse.quote(message_id, safe="")
         query = urllib.parse.urlencode({"type": resource_type})
@@ -591,6 +707,12 @@ class FeishuGateway:
 
     @staticmethod
     def _is_group_mentioned(*, event: dict[str, Any], text: str) -> bool:
+        """判断条件是否满足。
+        
+        Args:
+            event: 事件对象，包含飞书回调字段。
+            text: 待处理文本。
+        """
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         mentions = message.get("mentions")
         if isinstance(mentions, list) and mentions:
@@ -600,6 +722,11 @@ class FeishuGateway:
         return "@_all" in lowered or "<at " in lowered
 
     def _as_dict(self, data: Any) -> dict[str, Any]:
+        """处理as/dict相关逻辑并返回结果。
+        
+        Args:
+            data: 任意输入对象，尝试转换为字典。
+        """
         if isinstance(data, dict):
             return data
 
@@ -621,6 +748,11 @@ class FeishuGateway:
 
 
 def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
+    """启动飞书网关并开始处理入站消息。
+    
+    Args:
+        config_path: 目标路径参数，用于定位文件或目录。
+    """
     setup_logging()
 
     cfg = load_gateway_config(config_path)
@@ -686,6 +818,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             llm_audio=llm_audio,
             image_model_name=settings.model_routing.image_model_name,
             audio_model_name=settings.model_routing.audio_model_name,
+            token_optimization_settings=settings.token_optimization,
         ).app
 
         gateway = FeishuGateway(
@@ -698,6 +831,8 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
 
 
 def main() -> None:
+    """程序主入口。
+    """
     parser = argparse.ArgumentParser(description="Run W-bot Feishu gateway")
     parser.add_argument(
         "--config",
@@ -709,6 +844,11 @@ def main() -> None:
 
 
 def load_gateway_config(config_path: str) -> GatewayConfig:
+    """加载目标配置或数据并返回。
+    
+    Args:
+        config_path: 目标路径参数，用于定位文件或目录。
+    """
     target = Path(config_path)
     if not target.is_absolute():
         target = Path.cwd() / target
@@ -731,12 +871,23 @@ def load_gateway_config(config_path: str) -> GatewayConfig:
 
 
 def _write_default_config(target: Path) -> None:
+    """处理write/default/config相关逻辑并返回结果。
+    
+    Args:
+        target: 目标对象或目标路径。
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     template = default_app_config()
     target.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _build_llm(settings: Any, *, model_name: str) -> Any:
+    """构建并返回目标对象。
+    
+    Args:
+        settings: 全局设置对象。
+        model_name: 当前使用的模型名称。
+    """
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -748,6 +899,13 @@ def _build_llm(settings: Any, *, model_name: str) -> Any:
 
 
 def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """处理pick相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于按键名读取配置值。
+        keys: 候选键名列表，按顺序尝试读取。
+        default: 缺失配置时使用的默认值。
+    """
     for key in keys:
         if key in data:
             return data[key]
@@ -755,6 +913,11 @@ def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def _coerce_list(value: Any) -> list[str]:
+    """处理coerce/list相关逻辑并返回结果。
+    
+    Args:
+        value: 待转换或校验的值。
+    """
     if isinstance(value, list):
         out = [str(item).strip() for item in value if str(item).strip()]
         return out or ["*"]
@@ -764,12 +927,22 @@ def _coerce_list(value: Any) -> list[str]:
 
 
 def _sanitize_filename(name: str) -> str:
+    """处理sanitize/filename相关逻辑并返回结果。
+    
+    Args:
+        name: 名称参数，用于标识目标对象。
+    """
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name)
     cleaned = cleaned.strip("._")
     return cleaned or "file.bin"
 
 
 def _guess_kind_from_filename(name: str) -> str:
+    """处理guess/kind/from/filename相关逻辑并返回结果。
+    
+    Args:
+        name: 名称参数，用于标识目标对象。
+    """
     lowered = name.lower()
     if lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
         return "image"
@@ -785,6 +958,11 @@ def _guess_kind_from_filename(name: str) -> str:
 
 
 def _build_inbound_prompt_text(inbound: InboundMessage) -> str:
+    """构建并返回目标对象。
+    
+    Args:
+        inbound: 归一化后的入站消息对象。
+    """
     user_text = inbound.content.strip()
     if not inbound.media:
         return user_text
@@ -805,6 +983,11 @@ def _build_inbound_prompt_text(inbound: InboundMessage) -> str:
 
 
 def _kind_strategy(kind: str) -> str:
+    """处理kind/strategy相关逻辑并返回结果。
+    
+    Args:
+        kind: 媒体类型标识。
+    """
     if kind == "image":
         return "先识别图片关键信息，再结合用户目标执行。"
     if kind == "audio":
@@ -817,6 +1000,11 @@ def _kind_strategy(kind: str) -> str:
 
 
 def _flatten_post_text(content: dict[str, Any]) -> str:
+    """处理flatten/post/text相关逻辑并返回结果。
+    
+    Args:
+        content: 消息内容主体。
+    """
     post = content.get("post") if isinstance(content.get("post"), dict) else content
     if not isinstance(post, dict):
         return ""
@@ -843,6 +1031,11 @@ def _flatten_post_text(content: dict[str, Any]) -> str:
 
 
 def _message_to_text(content: Any) -> str:
+    """处理message/to/text相关逻辑并返回结果。
+    
+    Args:
+        content: 消息内容主体。
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):

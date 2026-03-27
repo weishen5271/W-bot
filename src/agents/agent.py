@@ -9,7 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .config import MultimodalSettings
+from .config import MultimodalSettings, TokenOptimizationSettings
 from .logging_config import get_logger
 from .context import ContextBuilder
 from .memory import LongTermMemoryStore
@@ -23,6 +23,8 @@ logger = get_logger(__name__)
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     long_term_context: str
+    conversation_summary: str
+    summarized_message_count: int
 
 
 class WBotGraph:
@@ -42,12 +44,32 @@ class WBotGraph:
         llm_audio: ChatOpenAI | None = None,
         image_model_name: str = "",
         audio_model_name: str = "",
+        token_optimization_settings: TokenOptimizationSettings | None = None,
     ) -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            llm: 大语言模型客户端实例。
+            tools: 工具对象列表。
+            memory_store: 长期记忆存储实例，用于检索与保存记忆。
+            retrieve_top_k: 记忆检索返回的最大条数。
+            user_id: 业务对象唯一标识。
+            checkpointer: LangGraph 检查点对象，用于持久化状态。
+            skills_loader: 技能加载器实例，用于读取 always 技能和技能摘要。
+            multimodal_settings: 多模态处理配置。
+            model_name: 当前使用的模型名称。
+            llm_image: 图像理解模型客户端实例。
+            llm_audio: 音频理解模型客户端实例。
+            image_model_name: 图像模型名称。
+            audio_model_name: 音频模型名称。
+            token_optimization_settings: Token 优化配置。
+        """
         logger.info(
             "Initializing WBotGraph: user_id=%s, retrieve_top_k=%s",
             user_id,
             retrieve_top_k,
         )
+        self._llm_plain = llm
         self._llm_text = llm.bind_tools(tools)
         self._llm_image = llm_image.bind_tools(tools) if llm_image is not None else None
         self._llm_audio = llm_audio.bind_tools(tools) if llm_audio is not None else None
@@ -60,6 +82,12 @@ class WBotGraph:
         self._image_model_name = image_model_name
         self._audio_model_name = audio_model_name
         self._normalizer_by_model: dict[str, MultimodalNormalizer] = {}
+        self._token_opt = token_optimization_settings or TokenOptimizationSettings(
+            enabled=True,
+            max_recent_user_turns=6,
+            summary_trigger_messages=12,
+            summary_max_chars=1200,
+        )
 
         graph_builder = StateGraph(AgentState)
         graph_builder.add_node("retrieve_memories", self._retrieve_memories)
@@ -86,6 +114,12 @@ class WBotGraph:
         state: AgentState,
         _: RunnableConfig | None = None,
     ) -> dict[str, str]:
+        """检索并返回匹配结果。
+        
+        Args:
+            state: Agent 当前状态字典。
+            _: 占位参数，不参与业务逻辑。
+        """
         query = _extract_last_user_message(state.get("messages", []))
         if not query:
             logger.debug("No user query found for memory retrieval")
@@ -115,25 +149,23 @@ class WBotGraph:
         self,
         state: AgentState,
         _: RunnableConfig | None = None,
-    ) -> dict[str, list[AIMessage]]:
+    ) -> dict[str, Any]:
+        """处理agent相关逻辑并返回结果。
+        
+        Args:
+            state: Agent 当前状态字典。
+            _: 占位参数，不参与业务逻辑。
+        """
         system_prompt = (
             "你是 W-bot CLI Agent。"
-            "你需要优先给出清晰、可执行的答案。"
-            "你必须遵循 Skill 路由策略："
-            "1) 用户显式点名 skill 时，优先使用该 skill；"
-            "2) 未点名时，先根据任务意图匹配可用 skill，命中后先读取 SKILL.md 全文再执行；"
-            "3) 多个 skill 命中时，选择最小必要集合并按顺序执行；"
-            "4) 若未使用任何 skill，需在回复中简要说明原因。"
-            "当任务需要精确计算、脚本验证或数据处理时，使用 execute_python 工具。"
-            "当用户偏好、长期事实或关键经验值得保留时，调用 save_memory。"
+            "优先给出清晰、可执行的答案。"
+            "用户点名 skill 时优先使用；否则按意图匹配最小必要 skill，命中后先读 SKILL.md 再执行。"
+            "未使用 skill 时简要说明原因。"
+            "需要精确计算、脚本验证或数据处理时使用 execute_python。"
+            "当用户偏好、长期事实或关键经验值得保留时调用 save_memory。"
             "工具调用参数必须严格匹配 schema。"
         )
         memory_context = state.get("long_term_context") or "无"
-        full_system_prompt = self._context_builder.build_system_prompt(
-            base_prompt=system_prompt,
-            memory_context=memory_context,
-        )
-
         history = state.get("messages", [])
         sanitized_history = sanitize_messages_for_llm(history)
         if len(sanitized_history) != len(history):
@@ -143,15 +175,21 @@ class WBotGraph:
                 len(sanitized_history),
             )
 
+        optimized = self._prepare_optimized_context(state=state, history=sanitized_history)
+        full_system_prompt = self._context_builder.build_system_prompt(
+            base_prompt=system_prompt,
+            memory_context=memory_context,
+            conversation_summary=optimized["conversation_summary"],
+        )
         messages: list[AnyMessage] = [
             SystemMessage(content=full_system_prompt),
             *normalize_messages_for_llm(
-                sanitized_history,
-                normalizer=self._normalizer_for_current_turn(sanitized_history),
+                optimized["recent_messages"],
+                normalizer=self._normalizer_for_current_turn(optimized["recent_messages"]),
             ),
         ]
         logger.debug("Invoking LLM with %s messages", len(messages))
-        llm, selected_route = self._llm_for_current_turn(sanitized_history, messages=messages)
+        llm, selected_route = self._llm_for_current_turn(optimized["recent_messages"], messages=messages)
         logger.info("Model routing selected route=%s", selected_route)
         try:
             response = llm.invoke(messages)
@@ -168,10 +206,19 @@ class WBotGraph:
             )
             response = self._llm_text.invoke(fallback_messages)
         logger.debug("LLM response received, has_tool_calls=%s", bool(response.tool_calls))
-        return {"messages": [response]}
+        return {
+            "messages": [response],
+            "conversation_summary": optimized["conversation_summary"],
+            "summarized_message_count": optimized["summarized_message_count"],
+        }
 
     @staticmethod
     def _route_after_agent(state: AgentState) -> str:
+        """处理route/after/agent相关逻辑并返回结果。
+        
+        Args:
+            state: Agent 当前状态字典。
+        """
         messages = state.get("messages", [])
         if not messages:
             logger.debug("Route decision: no messages -> end")
@@ -189,6 +236,12 @@ class WBotGraph:
         *,
         messages: list[AnyMessage],
     ) -> tuple[Any, str]:
+        """处理llm/for/current/turn相关逻辑并返回结果。
+        
+        Args:
+            history: 历史消息列表。
+            messages: 消息列表，通常按时间顺序排列。
+        """
         route = _route_for_history(history)
         has_native_image = _has_native_image_blocks(messages)
         if route == "image" and has_native_image and self._llm_image is not None:
@@ -198,6 +251,11 @@ class WBotGraph:
         return self._llm_text, "text"
 
     def _normalizer_for_current_turn(self, history: list[AnyMessage]) -> MultimodalNormalizer | None:
+        """将输入标准化为统一结构。
+        
+        Args:
+            history: 历史消息列表。
+        """
         if self._multimodal_cfg is None:
             return None
 
@@ -228,8 +286,104 @@ class WBotGraph:
         self._normalizer_by_model[model_name] = normalizer
         return normalizer
 
+    def _prepare_optimized_context(
+        self,
+        *,
+        state: AgentState,
+        history: list[AnyMessage],
+    ) -> dict[str, Any]:
+        """处理prepare/optimized/context相关逻辑并返回结果。
+        
+        Args:
+            state: Agent 当前状态字典。
+            history: 历史消息列表。
+        """
+        if not self._token_opt.enabled:
+            return {
+                "conversation_summary": state.get("conversation_summary", ""),
+                "summarized_message_count": int(state.get("summarized_message_count", 0) or 0),
+                "recent_messages": history,
+            }
+
+        summary = str(state.get("conversation_summary", "") or "")
+        summarized_count = max(0, int(state.get("summarized_message_count", 0) or 0))
+        recent_start = _recent_window_start(history, max_user_turns=self._token_opt.max_recent_user_turns)
+        target_end = min(recent_start, len(history))
+        unsummarized_count = max(0, target_end - summarized_count)
+
+        if unsummarized_count >= self._token_opt.summary_trigger_messages:
+            delta = history[summarized_count:target_end]
+            transcript = _messages_to_summary_text(delta)
+            if transcript:
+                summary = self._update_summary(
+                    existing_summary=summary,
+                    transcript=transcript,
+                    max_chars=self._token_opt.summary_max_chars,
+                )
+                summarized_count = target_end
+                logger.debug(
+                    "Updated rolling summary: summarized_count=%s, summary_chars=%s",
+                    summarized_count,
+                    len(summary),
+                )
+
+        recent_messages = history[recent_start:]
+        return {
+            "conversation_summary": summary,
+            "summarized_message_count": summarized_count,
+            "recent_messages": recent_messages,
+        }
+
+    def _update_summary(
+        self,
+        *,
+        existing_summary: str,
+        transcript: str,
+        max_chars: int,
+    ) -> str:
+        """更新内部状态或中间结果。
+        
+        Args:
+            existing_summary: 已有对话摘要文本。
+            transcript: 待压缩的对话转写文本。
+            max_chars: 返回文本片段允许的最大字符数。
+        """
+        prompt = (
+            "请维护一段会话滚动摘要，用于后续对话上下文压缩。"
+            "要求：保留目标、约束、已完成、待办、关键偏好和重要结论；"
+            "删除闲聊与重复；输出中文纯文本。"
+            f"长度不超过 {max_chars} 字。"
+        )
+        payload = (
+            f"已有摘要：\n{existing_summary or '无'}\n\n"
+            f"新增对话片段：\n{transcript}\n\n"
+            "请输出更新后的摘要："
+        )
+        try:
+            result = self._llm_plain.invoke(
+                [
+                    SystemMessage(content=prompt),
+                    HumanMessage(content=payload),
+                ]
+            )
+            text = _to_text_content(result.content).strip()
+        except Exception:
+            logger.exception("Failed to update rolling summary with LLM")
+            text = existing_summary
+
+        if not text:
+            return existing_summary
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip()
+
 
 def _extract_last_user_message(messages: list[AnyMessage]) -> str:
+    """从输入中提取所需信息。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+    """
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             content, _, is_blocks = parse_human_payload(
@@ -243,6 +397,11 @@ def _extract_last_user_message(messages: list[AnyMessage]) -> str:
 
 
 def message_kind(message: AnyMessage) -> str:
+    """处理message/kind相关逻辑并返回结果。
+    
+    Args:
+        message: 单条消息对象。
+    """
     if isinstance(message, HumanMessage):
         return "human"
     if isinstance(message, ToolMessage):
@@ -255,7 +414,11 @@ def message_kind(message: AnyMessage) -> str:
 
 
 def sanitize_messages_for_llm(messages: list[AnyMessage]) -> list[AnyMessage]:
-    """Drop malformed tool-call segments so providers don't reject the request."""
+    """处理sanitize/messages/for/llm相关逻辑并返回结果。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+    """
 
     sanitized: list[AnyMessage] = []
     idx = 0
@@ -296,6 +459,11 @@ def sanitize_messages_for_llm(messages: list[AnyMessage]) -> list[AnyMessage]:
 
 
 def _extract_tool_call_ids(message: AIMessage) -> set[str]:
+    """从输入中提取所需信息。
+    
+    Args:
+        message: 单条消息对象。
+    """
     ids: set[str] = set()
     for tool_call in message.tool_calls:
         if isinstance(tool_call, dict):
@@ -310,6 +478,12 @@ def normalize_messages_for_llm(
     *,
     normalizer: MultimodalNormalizer | None,
 ) -> list[AnyMessage]:
+    """将输入标准化为统一结构。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+        normalizer: 多模态归一化器实例。
+    """
     if normalizer is None:
         return messages
 
@@ -362,6 +536,11 @@ def normalize_messages_for_llm(
 
 
 def _human_blocks_to_text(content: Any) -> str:
+    """处理human/blocks/to/text相关逻辑并返回结果。
+    
+    Args:
+        content: 消息内容主体。
+    """
     if not isinstance(content, list):
         return str(content)
     lines: list[str] = []
@@ -376,6 +555,11 @@ def _human_blocks_to_text(content: Any) -> str:
 
 
 def _route_for_history(messages: list[AnyMessage]) -> str:
+    """处理route/for/history相关逻辑并返回结果。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+    """
     for message in reversed(messages):
         if not isinstance(message, HumanMessage):
             continue
@@ -393,6 +577,11 @@ def _route_for_history(messages: list[AnyMessage]) -> str:
 
 
 def _is_messages_length_error(exc: Exception) -> bool:
+    """判断条件是否满足。
+    
+    Args:
+        exc: 捕获到的异常对象。
+    """
     text = str(exc).lower()
     return "messages parameter length invalid" in text
 
@@ -402,6 +591,12 @@ def _build_text_only_retry_messages(
     system_prompt: str,
     history: list[AnyMessage],
 ) -> list[AnyMessage]:
+    """构建并返回目标对象。
+    
+    Args:
+        system_prompt: 系统提示词文本。
+        history: 历史消息列表。
+    """
     user_text = ""
     for message in reversed(history):
         if not isinstance(message, HumanMessage):
@@ -420,6 +615,11 @@ def _build_text_only_retry_messages(
 
 
 def _to_text_content(content: Any) -> str:
+    """将输入转换为目标格式。
+    
+    Args:
+        content: 消息内容主体。
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -433,6 +633,11 @@ def _to_text_content(content: Any) -> str:
 
 
 def _has_native_image_blocks(messages: list[AnyMessage]) -> bool:
+    """判断是否包含目标内容。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+    """
     for message in messages:
         if not isinstance(message, HumanMessage):
             continue
@@ -446,3 +651,47 @@ def _has_native_image_blocks(messages: list[AnyMessage]) -> bool:
             if block_type in {"image_url", "image"}:
                 return True
     return False
+
+
+def _recent_window_start(messages: list[AnyMessage], *, max_user_turns: int) -> int:
+    """处理recent/window/start相关逻辑并返回结果。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+        max_user_turns: 数值限制参数，用于控制处理规模。
+    """
+    if max_user_turns <= 0:
+        return 0
+    seen = 0
+    for idx in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[idx], HumanMessage):
+            seen += 1
+            if seen == max_user_turns:
+                return idx
+    return 0
+
+
+def _messages_to_summary_text(messages: list[AnyMessage]) -> str:
+    """处理messages/to/summary/text相关逻辑并返回结果。
+    
+    Args:
+        messages: 消息列表，通常按时间顺序排列。
+    """
+    lines: list[str] = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            role = "用户"
+        elif isinstance(message, ToolMessage):
+            role = "工具"
+        elif isinstance(message, AIMessage) and message.tool_calls:
+            role = "助手(工具调用)"
+        elif isinstance(message, AIMessage):
+            role = "助手"
+        else:
+            role = "消息"
+
+        text = _to_text_content(message.content).strip()
+        if not text:
+            continue
+        lines.append(f"{role}: {text}")
+    return "\n".join(lines)

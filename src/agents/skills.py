@@ -40,11 +40,22 @@ class SkillsLoader:
         workspace_skills_dir: str = "skills",
         builtin_skills_dir: str | None = None,
     ) -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            workspace_skills_dir: 工作区技能目录路径。
+            builtin_skills_dir: 内置技能目录路径。
+        """
         self.workspace_skills_dir = _resolve_to_abs(Path(workspace_skills_dir))
         self.builtin_skills_dir = _resolve_to_abs(Path(builtin_skills_dir)) if builtin_skills_dir else BUILTIN_SKILLS_DIR
         self.workspace_skills_dir.mkdir(parents=True, exist_ok=True)
 
     def list_skills(self, *, filter_unavailable: bool = False) -> list[SkillSpec]:
+        """处理list/skills相关逻辑并返回结果。
+        
+        Args:
+            filter_unavailable: 是否过滤不可用技能。
+        """
         merged: dict[str, SkillSpec] = {}
         for item in self._scan_dir(self.builtin_skills_dir, source="builtin"):
             merged[item.name] = item
@@ -57,6 +68,8 @@ class SkillsLoader:
         return [skill for skill in ordered if self.check_requirements(skill).available]
 
     def get_always_skills(self) -> list[SkillSpec]:
+        """处理get/always/skills相关逻辑并返回结果。
+        """
         always_skills: list[SkillSpec] = []
         for skill in self.list_skills(filter_unavailable=False):
             check = self.check_requirements(skill)
@@ -65,6 +78,8 @@ class SkillsLoader:
         return always_skills
 
     def build_skills_summary(self) -> str:
+        """构建并返回目标对象。
+        """
         skills = self.list_skills(filter_unavailable=False)
         if not skills:
             return "<skills>\n(no skills found)\n</skills>"
@@ -88,6 +103,11 @@ class SkillsLoader:
         return "\n".join(lines)
 
     def check_requirements(self, skill: SkillSpec) -> SkillRequirementCheck:
+        """检查条件并返回判断结果。
+        
+        Args:
+            skill: 技能对象。
+        """
         missing_bins = tuple(bin_name for bin_name in skill.requires_bins if shutil.which(bin_name) is None)
         missing_env = tuple(env_name for env_name in skill.requires_env if not os.getenv(env_name))
         available = not missing_bins and not missing_env
@@ -98,6 +118,12 @@ class SkillsLoader:
         )
 
     def _scan_dir(self, skills_dir: Path, *, source: str) -> list[SkillSpec]:
+        """处理scan/dir相关逻辑并返回结果。
+        
+        Args:
+            skills_dir: 技能目录路径。
+            source: 来源文本或来源标识。
+        """
         if not skills_dir.exists() or not skills_dir.is_dir():
             return []
 
@@ -114,6 +140,13 @@ class SkillsLoader:
         return discovered
 
     def _parse_skill_file(self, *, skill_file: Path, fallback_name: str, source: str) -> SkillSpec | None:
+        """解析输入并返回结构化结果。
+        
+        Args:
+            skill_file: 技能文件路径。
+            fallback_name: 名称参数，用于标识目标对象。
+            source: 来源文本或来源标识。
+        """
         try:
             raw = skill_file.read_text(encoding="utf-8")
         except OSError:
@@ -143,6 +176,11 @@ class SkillsLoader:
 
 
 def _parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
+    """解析输入并返回结构化结果。
+    
+    Args:
+        raw: 原始输入内容。
+    """
     lines = raw.splitlines()
     if len(lines) < 3 or lines[0].strip() != "---":
         return {}, raw
@@ -167,6 +205,11 @@ def _parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
 
 def _parse_scalar(raw: str) -> Any:
+    """解析输入并返回结构化结果。
+    
+    Args:
+        raw: 原始输入内容。
+    """
     if not raw:
         return ""
     if raw.startswith(("'", '"')) and raw.endswith(("'", '"')) and len(raw) >= 2:
@@ -178,6 +221,11 @@ def _parse_scalar(raw: str) -> Any:
 
 
 def _parse_metadata(value: Any) -> dict[str, Any]:
+    """解析输入并返回结构化结果。
+    
+    Args:
+        value: 待转换或校验的值。
+    """
     if isinstance(value, dict):
         return value
     if isinstance(value, str) and value.strip():
@@ -204,6 +252,11 @@ def _parse_metadata(value: Any) -> dict[str, Any]:
 
 
 def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
+    """处理coerce/str/tuple相关逻辑并返回结果。
+    
+    Args:
+        value: 待转换或校验的值。
+    """
     if not isinstance(value, list):
         return ()
     result = [str(item).strip() for item in value if str(item).strip()]
@@ -211,6 +264,11 @@ def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
 
 
 def _coerce_bool(value: Any) -> bool:
+    """处理coerce/bool相关逻辑并返回结果。
+    
+    Args:
+        value: 待转换或校验的值。
+    """
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -219,4 +277,9 @@ def _coerce_bool(value: Any) -> bool:
 
 
 def _resolve_to_abs(path: Path) -> Path:
+    """处理resolve/to/abs相关逻辑并返回结果。
+    
+    Args:
+        path: 文件路径。
+    """
     return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()

@@ -29,6 +29,12 @@ class MultimodalNormalizer:
         cfg: MultimodalRuntimeConfig,
         capabilities: ProviderCapabilities,
     ) -> None:
+        """初始化对象并保存运行所需依赖。
+        
+        Args:
+            cfg: 多模态配置对象。
+            capabilities: 模型能力集合，用于判断是否支持特性。
+        """
         self._cfg = cfg
         self._capabilities = capabilities
 
@@ -39,6 +45,13 @@ class MultimodalNormalizer:
         media: list[MediaItem],
         compact_media: bool,
     ) -> NormalizedUserContent:
+        """将输入标准化为统一结构。
+        
+        Args:
+            text: 待处理文本。
+            media: 媒体项列表。
+            compact_media: 是否使用精简媒体表示。
+        """
         output = NormalizedUserContent()
 
         if text.strip():
@@ -94,6 +107,13 @@ class MultimodalNormalizer:
         compact_media: bool,
         out: NormalizedUserContent,
     ) -> None:
+        """将输入标准化为统一结构。
+        
+        Args:
+            item: 当前处理的单个元素。
+            compact_media: 是否使用精简媒体表示。
+            out: 结果输出列表，用于收集归一化后的块。
+        """
         kind = item.kind
 
         if kind == "image":
@@ -195,7 +215,12 @@ def parse_human_payload(
     *,
     additional_kwargs: dict[str, Any] | None = None,
 ) -> tuple[str, list[MediaItem], bool]:
-    """Parse HumanMessage content and indicate whether it is already normalized blocks."""
+    """解析输入并返回结构化结果。
+    
+    Args:
+        content: 消息内容主体。
+        additional_kwargs: 附加关键字参数字典。
+    """
 
     from .pipeline import to_media_item
 

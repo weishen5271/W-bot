@@ -33,6 +33,7 @@ class Settings:
     skills_builtin_dir: str
     model_routing: "ModelRoutingSettings"
     multimodal: "MultimodalSettings"
+    token_optimization: "TokenOptimizationSettings"
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,25 @@ class ModelRoutingSettings:
     audio_model_name: str
 
 
+@dataclass(frozen=True)
+class TokenOptimizationSettings:
+    enabled: bool
+    max_recent_user_turns: int
+    summary_trigger_messages: int
+    summary_max_chars: int
+
+
 def load_settings(
     *,
     config_path: str = DEFAULT_APP_CONFIG_PATH,
     overrides: dict[str, Any] | None = None,
 ) -> Settings:
+    """加载应用配置并转换为结构化设置对象。
+    
+    Args:
+        config_path: 目标路径参数，用于定位文件或目录。
+        overrides: 覆盖配置项字典，用于覆盖文件中的默认配置。
+    """
     payload = _load_or_create_app_config(config_path)
     agent_cfg = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
 
@@ -71,6 +86,9 @@ def load_settings(
         merged.get("modelRouting") if isinstance(merged.get("modelRouting"), dict) else {}
     )
     multimodal_payload = merged.get("multimodal") if isinstance(merged.get("multimodal"), dict) else {}
+    token_opt_payload = (
+        merged.get("tokenOptimization") if isinstance(merged.get("tokenOptimization"), dict) else {}
+    )
 
     settings = Settings(
         dashscope_api_key=_must_value(merged, "dashscopeApiKey", "dashscope_api_key"),
@@ -186,6 +204,27 @@ def load_settings(
             temp_ttl_hours=_int_value(multimodal_payload, "tempTtlHours", "temp_ttl_hours", default=24),
             media_root_dir=_string_value(multimodal_payload, "mediaRootDir", "media_root_dir", default="media"),
         ),
+        token_optimization=TokenOptimizationSettings(
+            enabled=_bool_value(token_opt_payload, "enabled", default=True),
+            max_recent_user_turns=_int_value(
+                token_opt_payload,
+                "maxRecentUserTurns",
+                "max_recent_user_turns",
+                default=6,
+            ),
+            summary_trigger_messages=_int_value(
+                token_opt_payload,
+                "summaryTriggerMessages",
+                "summary_trigger_messages",
+                default=12,
+            ),
+            summary_max_chars=_int_value(
+                token_opt_payload,
+                "summaryMaxChars",
+                "summary_max_chars",
+                default=1200,
+            ),
+        ),
     )
     logger.info(
         "Settings loaded from %s: model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
@@ -200,6 +239,11 @@ def load_settings(
 
 
 def _load_or_create_app_config(config_path: str) -> dict[str, Any]:
+    """加载目标配置或数据并返回。
+    
+    Args:
+        config_path: 目标路径参数，用于定位文件或目录。
+    """
     target = Path(config_path)
     if not target.is_absolute():
         target = Path.cwd() / target
@@ -224,6 +268,8 @@ def _load_or_create_app_config(config_path: str) -> dict[str, Any]:
 
 
 def default_app_config() -> dict[str, Any]:
+    """处理default/app/config相关逻辑并返回结果。
+    """
     return {
         "agent": {
             "dashscopeApiKey": "",
@@ -261,6 +307,12 @@ def default_app_config() -> dict[str, Any]:
                 "tempTtlHours": 24,
                 "mediaRootDir": "media",
             },
+            "tokenOptimization": {
+                "enabled": True,
+                "maxRecentUserTurns": 6,
+                "summaryTriggerMessages": 12,
+                "summaryMaxChars": 1200,
+            },
         },
         "channels": {
             "feishu": {
@@ -280,6 +332,12 @@ def default_app_config() -> dict[str, Any]:
 
 
 def _pick(data: dict[str, Any], *keys: str) -> Any:
+    """处理pick相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于按键名读取配置值。
+        keys: 候选键名列表，按顺序尝试读取。
+    """
     for key in keys:
         if key in data:
             return data[key]
@@ -287,6 +345,12 @@ def _pick(data: dict[str, Any], *keys: str) -> Any:
 
 
 def _must_value(data: dict[str, Any], *keys: str) -> str:
+    """处理must/value相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于读取必填配置。
+        keys: 候选键名列表，按顺序尝试读取。
+    """
     value = _pick(data, *keys)
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -294,6 +358,13 @@ def _must_value(data: dict[str, Any], *keys: str) -> str:
 
 
 def _string_value(data: dict[str, Any], *keys: str, default: str) -> str:
+    """处理string/value相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于读取字符串配置。
+        keys: 候选键名列表，按顺序尝试读取。
+        default: 缺失配置时使用的默认值。
+    """
     value = _pick(data, *keys)
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -301,6 +372,13 @@ def _string_value(data: dict[str, Any], *keys: str, default: str) -> str:
 
 
 def _int_value(data: dict[str, Any], *keys: str, default: int) -> int:
+    """处理int/value相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于读取整数配置。
+        keys: 候选键名列表，按顺序尝试读取。
+        default: 缺失配置时使用的默认值。
+    """
     value = _pick(data, *keys)
     if value is None:
         return default
@@ -312,6 +390,13 @@ def _int_value(data: dict[str, Any], *keys: str, default: int) -> int:
 
 
 def _bool_value(data: dict[str, Any], *keys: str, default: bool) -> bool:
+    """处理bool/value相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于读取布尔配置。
+        keys: 候选键名列表，按顺序尝试读取。
+        default: 缺失配置时使用的默认值。
+    """
     value = _pick(data, *keys)
     if isinstance(value, bool):
         return value
@@ -321,6 +406,13 @@ def _bool_value(data: dict[str, Any], *keys: str, default: bool) -> bool:
 
 
 def _list_value(data: dict[str, Any], *keys: str, default: list[Any]) -> list[Any]:
+    """处理list/value相关逻辑并返回结果。
+    
+    Args:
+        data: 输入字典对象，用于读取列表配置。
+        keys: 候选键名列表，按顺序尝试读取。
+        default: 缺失配置时使用的默认值。
+    """
     value = _pick(data, *keys)
     if isinstance(value, list):
         return value
