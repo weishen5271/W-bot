@@ -11,7 +11,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agents.agent import CyberCoreGraph
+from agents.agent import WBotGraph
 from agents.config import default_app_config, load_settings
 from agents.logging_config import get_logger, setup_logging
 from agents.memory import LongTermMemoryStore
@@ -419,7 +419,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         if hasattr(checkpointer, "setup"):
             checkpointer.setup()
 
-        graph = CyberCoreGraph(
+        graph = WBotGraph(
             llm=llm,
             tools=tools,
             memory_store=memory_store,
@@ -434,7 +434,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run CyberCore Feishu gateway")
+    parser = argparse.ArgumentParser(description="Run W-bot Feishu gateway")
     parser.add_argument(
         "--config",
         default="configs/app.json",

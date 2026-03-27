@@ -15,14 +15,14 @@ if __package__ in (None, ""):
     _SRC_DIR = os.path.dirname(os.path.dirname(__file__))
     if _SRC_DIR not in sys.path:
         sys.path.insert(0, _SRC_DIR)
-    from agents.agent import CyberCoreGraph, message_kind
+    from agents.agent import WBotGraph, message_kind
     from agents.config import Settings, load_settings
     from agents.logging_config import get_logger, setup_logging
     from agents.memory import LongTermMemoryStore
     from agents.skills import SkillsLoader
     from agents.tools.runtime import build_tools
 else:
-    from .agent import CyberCoreGraph, message_kind
+    from .agent import WBotGraph, message_kind
     from .config import Settings, load_settings
     from .logging_config import get_logger, setup_logging
     from .memory import LongTermMemoryStore
@@ -64,7 +64,7 @@ class SessionStateStore:
 
 def run_cli(config_path: str = "configs/app.json") -> None:
     setup_logging()
-    logger.info("Starting CyberCore CLI runtime")
+    logger.info("Starting W-bot CLI runtime")
 
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
@@ -102,7 +102,7 @@ def run_cli(config_path: str = "configs/app.json") -> None:
             logger.info("Running checkpointer setup")
             checkpointer.setup()
 
-        graph = CyberCoreGraph(
+        graph = WBotGraph(
             llm=llm,
             tools=tools,
             memory_store=memory_store,
@@ -126,7 +126,7 @@ def build_llm(settings: Settings) -> ChatOpenAI:
 
 
 def _repl(graph: Any, settings: Settings) -> None:
-    console.print("[bold cyan]CyberCore CLI[/bold cyan] | type quit/exit to leave")
+    console.print("[bold cyan]W-bot CLI[/bold cyan] | type quit/exit to leave")
 
     session_store = SessionStateStore(settings.session_state_file_path)
     current_session_id = session_store.load() or settings.session_id

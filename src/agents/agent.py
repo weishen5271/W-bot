@@ -22,7 +22,7 @@ class AgentState(TypedDict):
     long_term_context: str
 
 
-class CyberCoreGraph:
+class WBotGraph:
     def __init__(
         self,
         *,
@@ -35,7 +35,7 @@ class CyberCoreGraph:
         skills_loader: SkillsLoader | None = None,
     ) -> None:
         logger.info(
-            "Initializing CyberCoreGraph: user_id=%s, retrieve_top_k=%s",
+            "Initializing WBotGraph: user_id=%s, retrieve_top_k=%s",
             user_id,
             retrieve_top_k,
         )
@@ -101,7 +101,7 @@ class CyberCoreGraph:
         _: RunnableConfig | None = None,
     ) -> dict[str, list[AIMessage]]:
         system_prompt = (
-            "你是 CyberCore CLI Agent。"
+            "你是 W-bot CLI Agent。"
             "你需要优先给出清晰、可执行的答案。"
             "当任务需要精确计算、脚本验证或数据处理时，使用 execute_python 工具。"
             "当用户偏好、长期事实或关键经验值得保留时，调用 save_memory。"

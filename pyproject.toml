@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cybercore-cli"
+name = "w-bot-cli"
 version = "0.1.0"
-description = "CyberCore CLI Agent (LangGraph + Qwen + PG + Milvus + E2B)"
+description = "W-bot CLI Agent (LangGraph + Qwen + PG + Milvus + E2B)"
 requires-python = ">=3.10"
 dependencies = [
     "langchain>=0.3.0",
@@ -30,6 +30,6 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [project.scripts]
-cybercore = "agents.cli:run_cli"
+w-bot = "agents.cli:run_cli"
 agents-cli = "agents.cli:run_cli"
 agents-feishu = "channels.feishu.gateway:main"

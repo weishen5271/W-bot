@@ -1,1 +1,1 @@
-"""CyberCore CLI Agent package."""
+"""W-bot CLI Agent package."""

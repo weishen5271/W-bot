@@ -1,30 +1,34 @@
-# CyberCore CLI Agent
+# W-bot CLI Agent
 
-CyberCore is a CLI agent built with LangGraph.
+[中文](./README.md) | [English](./README_EN.md)
 
-## Memory architecture
+Java version project: https://github.com/weishen5271/W-bot-java
 
-- Short-term memory: stored in PostgreSQL via `PostgresSaver`, isolated by `session_id`.
-- Long-term memory: persisted to local `MEMORY.MD`.
+W-bot 是一个基于 LangGraph 构建的 CLI Agent。
 
-`MEMORY.MD` structure:
+### 记忆架构
+
+- 短期记忆：通过 `PostgresSaver` 存储在 PostgreSQL 中，按 `session_id` 隔离。
+- 长期记忆：持久化到本地 `MEMORY.MD`。
+
+`MEMORY.MD` 结构：
 
 - `User Information`
 - `Preferences`
 - `Project Context`
 - `Important Notes`
 
-The file is automatically maintained by the `save_memory` tool.
+该文件由 `save_memory` 工具自动维护。
 
-## Quick start
+### 快速开始
 
-1. Start PostgreSQL:
+1. 启动 PostgreSQL：
 
 ```bash
 docker compose up -d
 ```
 
-2. Install dependencies:
+2. 安装依赖：
 
 ```bash
 python -m venv .venv
@@ -34,35 +38,35 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-3. Configure app JSON:
+3. 配置 app JSON：
 
 ```bash
 cp configs/app.json.example configs/app.json
-# Then fill your real keys/secrets in configs/app.json
+# 然后在 configs/app.json 中填入真实 keys/secrets
 ```
 
-4. Run:
+4. 运行：
 
 ```bash
 python main.py cli --config configs/app.json
 ```
 
-Feishu gateway mode:
+飞书网关模式：
 
 ```bash
 python main.py feishu --config configs/app.json
 ```
 
-If `configs/app.json` does not exist, the app will auto-generate a template file.
-Fill `channels.feishu.appId` and `channels.feishu.appSecret` before restarting.
+如果 `configs/app.json` 不存在，程序会自动生成模板文件。
+重启前请先填写 `channels.feishu.appId` 和 `channels.feishu.appSecret`。
 
-Type `quit` or `exit` to leave.
+输入 `quit` 或 `exit` 退出。
 
-By default, the CLI resumes the previous short-term session automatically.
-Type `/new` in the CLI to start a brand new session context.
+默认情况下，CLI 会自动恢复上一次短期会话。
+在 CLI 中输入 `/new` 可开启全新的会话上下文。
 
-All runtime settings are now configured in `configs/app.json`.
-Example MCP server config:
+所有运行时配置统一放在 `configs/app.json`。
+MCP server 配置示例：
 
 ```json
 [
@@ -79,37 +83,37 @@ Example MCP server config:
 ]
 ```
 
-## Skill mechanism
+### Skill 机制
 
-This project now supports file-based skills with progressive loading:
+项目支持基于文件的 Skill，并按需渐进加载：
 
-- Builtin skills: `src/agents/skills_catalog/<skill>/SKILL.md`
-- Workspace skills: `skills/<skill>/SKILL.md` (overrides builtin on same name)
-- `always: true` skills are injected into system prompt when requirements are met.
-- All skills are listed in a runtime summary, and the model can load full content on demand using `read_file`.
+- 内置 skills：`src/agents/skills_catalog/<skill>/SKILL.md`
+- 工作区 skills：`skills/<skill>/SKILL.md`（同名时覆盖内置）
+- 满足条件时，`always: true` 的 skill 会注入系统提示词。
+- 所有 skill 会在运行时摘要中展示，模型可按需通过 `read_file` 加载完整内容。
 
-Skill requirements are read from frontmatter metadata:
+Skill 依赖从 frontmatter 元数据读取：
 
 - `metadata.requires.bins`
 - `metadata.requires.env`
-- `metadata.always` (or top-level `always`)
+- `metadata.always`（或顶层 `always`）
 
-Builtin `clawhub` skill is included for downloading skills via:
+内置了 `clawhub` skill，可用于下载技能：
 
 - `npx --yes clawhub@latest ...`
 
-To use it, make sure:
+使用前请确保：
 
-- `agent.enableExecTool=true` in config
-- host has `npx` available
+- 配置中 `agent.enableExecTool=true`
+- 运行环境有 `npx`
 
-## Key files
+### 关键文件
 
-- `src/agents/cli.py`: CLI runtime and Postgres checkpoint wiring.
-- `src/agents/agent.py`: LangGraph nodes and routing.
-- `src/agents/context.py`: system prompt assembly (memory + skills).
-- `src/agents/memory.py`: local `MEMORY.MD` long-term memory store.
-- `src/agents/skills.py`: skill discovery, availability checks, and summary rendering.
-- `src/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
-- `src/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
-- `configs/app.json`: unified app configuration (`agent + channels`).
+- `src/agents/cli.py`：CLI 运行时与 Postgres checkpoint 连接。
+- `src/agents/agent.py`：LangGraph 节点与路由。
+- `src/agents/context.py`：系统提示词组装（memory + skills）。
+- `src/agents/memory.py`：本地 `MEMORY.MD` 长期记忆存储。
+- `src/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
+- `src/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
+- `src/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。
+- `configs/app.json`：统一应用配置（`agent + channels`）。

@@ -66,7 +66,7 @@ with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
     if hasattr(checkpointer, "setup"):
         checkpointer.setup()
 
-    graph = CyberCoreGraph(
+    graph = WBotGraph(
         llm=llm,
         tools=tools,
         memory_store=memory_store,

@@ -3,11 +3,11 @@ version: '3.8'
 services:
   postgres:
     image: postgres:15
-    container_name: cybercore-postgres
+    container_name: w-bot-postgres
     environment:
       POSTGRES_USER: agent_user
       POSTGRES_PASSWORD: agent_password
-      POSTGRES_DB: cybercore_agent
+      POSTGRES_DB: w_bot_agent
     ports:
       - "5432:5432"
     volumes:

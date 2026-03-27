@@ -160,7 +160,7 @@ def build_tools(
     def web_fetch(url: str, max_chars: int = 8000) -> str:
         """Fetch a URL and return a cleaned text excerpt."""
 
-        req = url_request.Request(url, headers={"User-Agent": "CyberCore/1.0"})
+        req = url_request.Request(url, headers={"User-Agent": "W-bot/1.0"})
         try:
             with url_request.urlopen(req, timeout=20) as response:
                 raw = response.read().decode("utf-8", errors="ignore")
@@ -179,7 +179,7 @@ def build_tools(
             "content": content,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
-        _append_jsonl(workspace_root / ".cybercore_messages.jsonl", msg)
+        _append_jsonl(workspace_root / ".w_bot_messages.jsonl", msg)
         return f"Message queued: id={msg['id']} recipient={recipient}"
 
     @tool
@@ -193,7 +193,7 @@ def build_tools(
             "status": "pending",
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
-        _append_jsonl(workspace_root / ".cybercore_spawn_jobs.jsonl", job)
+        _append_jsonl(workspace_root / ".w_bot_spawn_jobs.jsonl", job)
         return f"Spawned task: id={job['id']}"
 
     @tool
@@ -358,7 +358,7 @@ def _build_cron_tool(*, workspace_root: Path) -> StructuredTool:
     ) -> str:
         """Manage simple cron task records when cron service is enabled."""
 
-        jobs_file = workspace_root / ".cybercore_cron_jobs.json"
+        jobs_file = workspace_root / ".w_bot_cron_jobs.json"
         jobs = _read_json_file(jobs_file, default=[])
         if not isinstance(jobs, list):
             jobs = []
@@ -490,7 +490,7 @@ def _http_get_json(
     headers: dict[str, Any] | None = None,
     timeout: int = 10,
 ) -> dict[str, Any] | str:
-    req_headers = {"User-Agent": "CyberCore/1.0"}
+    req_headers = {"User-Agent": "W-bot/1.0"}
     if headers:
         req_headers.update({str(k): str(v) for k, v in headers.items()})
     req = url_request.Request(url, headers=req_headers)
@@ -509,7 +509,7 @@ def _http_post_json(
     timeout: int = 10,
 ) -> dict[str, Any] | str:
     body = json.dumps(payload).encode("utf-8")
-    req_headers = {"Content-Type": "application/json", "User-Agent": "CyberCore/1.0"}
+    req_headers = {"Content-Type": "application/json", "User-Agent": "W-bot/1.0"}
     if headers:
         req_headers.update({str(k): str(v) for k, v in headers.items()})
     req = url_request.Request(url, data=body, headers=req_headers, method="POST")

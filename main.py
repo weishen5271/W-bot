@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CyberCore entrypoint")
+    parser = argparse.ArgumentParser(description="W-bot entrypoint")
     subparsers = parser.add_subparsers(dest="mode")
 
     cli_parser = subparsers.add_parser("cli", help="Run CLI mode")
@@ -36,8 +36,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     mode = args.mode or "cli"
     if mode == "feishu":
-        logger.info("Starting CyberCore Feishu gateway from main entrypoint")
+        logger.info("Starting W-bot Feishu gateway from main entrypoint")
         run_feishu_gateway(config_path=args.config)
     else:
-        logger.info("Starting CyberCore CLI from main entrypoint")
+        logger.info("Starting W-bot CLI from main entrypoint")
         run_cli(config_path=getattr(args, "config", "configs/app.json"))

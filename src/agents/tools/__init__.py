@@ -1,1 +1,1 @@
-"""Tooling for CyberCore Agent."""
+"""Tooling for W-bot Agent."""
