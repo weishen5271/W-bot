@@ -44,6 +44,9 @@ class Settings:
     enable_openclaw_profile: bool
     openclaw_profile_root_dir: str
     openclaw_auto_init: bool
+    loop_guard: "LoopGuardSettings"
+    enable_streaming: bool
+    enable_console_logs: bool
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,13 @@ class ShortTermMemoryOptimizationSettings:
     compress_level: int
 
 
+@dataclass(frozen=True)
+class LoopGuardSettings:
+    recursion_limit: int
+    max_tool_steps_per_turn: int
+    max_same_tool_call_repeats: int
+
+
 def load_settings(
     *,
     config_path: str = DEFAULT_APP_CONFIG_PATH,
@@ -127,6 +137,7 @@ def load_settings(
         if isinstance(merged.get("shortTermMemoryOptimization"), dict)
         else {}
     )
+    loop_guard_payload = merged.get("loopGuard") if isinstance(merged.get("loopGuard"), dict) else {}
 
     settings = Settings(
         model_provider=model_provider,
@@ -331,6 +342,38 @@ def load_settings(
             "openclaw_auto_init",
             default=True,
         ),
+        enable_streaming=_bool_value(
+            merged,
+            "enableStreaming",
+            "enable_streaming",
+            default=False,
+        ),
+        enable_console_logs=_bool_value(
+            merged,
+            "enableConsoleLogs",
+            "enable_console_logs",
+            default=True,
+        ),
+        loop_guard=LoopGuardSettings(
+            recursion_limit=_int_value(
+                loop_guard_payload,
+                "recursionLimit",
+                "recursion_limit",
+                default=20,
+            ),
+            max_tool_steps_per_turn=_int_value(
+                loop_guard_payload,
+                "maxToolStepsPerTurn",
+                "max_tool_steps_per_turn",
+                default=8,
+            ),
+            max_same_tool_call_repeats=_int_value(
+                loop_guard_payload,
+                "maxSameToolCallRepeats",
+                "max_same_tool_call_repeats",
+                default=3,
+            ),
+        ),
     )
     logger.info(
         "Settings loaded from %s: provider=%s, model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
@@ -432,6 +475,12 @@ def default_app_config() -> dict[str, Any]:
             "enableOpenClawProfile": True,
             "openClawProfileRootDir": ".",
             "openClawAutoInit": True,
+            "loopGuard": {
+                "recursionLimit": 20,
+                "maxToolStepsPerTurn": 8,
+                "maxSameToolCallRepeats": 3,
+            },
+            "enableConsoleLogs": True,
         },
         "agents": {
             "defaults": {

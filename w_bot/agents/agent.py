@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -19,6 +20,33 @@ from .providers import resolve_provider_capabilities
 from .skills import SkillsLoader
 
 logger = get_logger(__name__)
+
+
+_RUNTIME_TOKEN_CALLBACK: Callable[[str], None] | None = None
+_RUNTIME_DEBUG_CALLBACK: Callable[[str], None] | None = None
+
+
+def set_runtime_callbacks(
+    *,
+    token_callback: Callable[[str], None] | None = None,
+    debug_callback: Callable[[str], None] | None = None,
+) -> None:
+    global _RUNTIME_TOKEN_CALLBACK
+    global _RUNTIME_DEBUG_CALLBACK
+    _RUNTIME_TOKEN_CALLBACK = token_callback
+    _RUNTIME_DEBUG_CALLBACK = debug_callback
+
+
+def clear_runtime_callbacks() -> None:
+    set_runtime_callbacks(token_callback=None, debug_callback=None)
+
+
+def _get_runtime_token_callback() -> Callable[[str], None] | None:
+    return _RUNTIME_TOKEN_CALLBACK
+
+
+def _get_runtime_debug_callback() -> Callable[[str], None] | None:
+    return _RUNTIME_DEBUG_CALLBACK
 
 
 class AgentState(TypedDict):
@@ -47,6 +75,8 @@ class WBotGraph:
         image_model_name: str = "",
         audio_model_name: str = "",
         token_optimization_settings: TokenOptimizationSettings | None = None,
+        max_tool_steps_per_turn: int = 8,
+        max_same_tool_call_repeats: int = 3,
     ) -> None:
         """初始化对象并保存运行所需依赖。
         
@@ -94,6 +124,8 @@ class WBotGraph:
             summary_trigger_messages=12,
             summary_max_chars=1200,
         )
+        self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
+        self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
 
         graph_builder = StateGraph(AgentState)
         graph_builder.add_node("retrieve_memories", self._retrieve_memories)
@@ -204,31 +236,98 @@ class WBotGraph:
         logger.info("Model routing selected route=%s", selected_route)
         _emit_status(config, f"已选择模型路由：{selected_route}。")
         _emit_status(config, "正在生成回复...")
-        token_callback = _resolve_stream_token_callback(config)
+        token_callback = _resolve_stream_token_callback(config) or _get_runtime_token_callback()
+        debug_callback = _resolve_debug_callback(config) or _get_runtime_debug_callback()
         try:
             response = _invoke_llm_with_optional_stream(
                 llm=llm,
                 messages=messages,
                 token_callback=token_callback,
+                debug_callback=debug_callback,
             )
         except Exception as exc:
-            if not _is_messages_length_error(exc):
-                raise
-            logger.warning(
-                "Provider rejected message payload; retry with strict text-only fallback: %s",
-                exc,
-            )
-            _emit_status(config, "触发兼容回退：改用纯文本上下文重试。")
-            fallback_messages = _build_text_only_retry_messages(
-                system_prompt=full_system_prompt,
-                history=messages,
-            )
-            response = _invoke_llm_with_optional_stream(
-                llm=self._llm_text,
-                messages=fallback_messages,
-                token_callback=token_callback,
-            )
+            if _is_messages_length_error(exc):
+                logger.warning(
+                    "Provider rejected message payload; retry with strict text-only fallback: %s",
+                    exc,
+                )
+                _emit_status(config, "触发兼容回退：改用纯文本上下文重试。")
+                fallback_messages = _build_text_only_retry_messages(
+                    system_prompt=full_system_prompt,
+                    history=messages,
+                )
+                try:
+                    response = _invoke_llm_with_optional_stream(
+                        llm=self._llm_text,
+                        messages=fallback_messages,
+                        token_callback=token_callback,
+                        debug_callback=debug_callback,
+                    )
+                except Exception:
+                    logger.exception("Text-only compatibility fallback failed")
+                    _emit_status(config, "模型调用失败，已返回兜底提示。")
+                    response = AIMessage(content=_runtime_error_reply_text())
+            elif selected_route != "text":
+                logger.warning(
+                    "Route=%s model failed; retry with text model, error=%s",
+                    selected_route,
+                    exc,
+                )
+                _emit_status(config, f"{selected_route} 模型调用失败，正在回退到 text 模型重试。")
+                try:
+                    response = _invoke_llm_with_optional_stream(
+                        llm=self._llm_text,
+                        messages=messages,
+                        token_callback=token_callback,
+                        debug_callback=debug_callback,
+                    )
+                except Exception:
+                    logger.exception("Route fallback to text model failed")
+                    _emit_status(config, "模型调用失败，已返回兜底提示。")
+                    response = AIMessage(content=_runtime_error_reply_text())
+            else:
+                logger.exception("Text model invoke failed")
+                _emit_status(config, "模型调用失败，已返回兜底提示。")
+                response = AIMessage(content=_runtime_error_reply_text())
         logger.debug("LLM response received, has_tool_calls=%s", bool(response.tool_calls))
+        if response.tool_calls:
+            projected_history = [*sanitized_history, response]
+            tool_steps = _count_tool_steps_since_last_human(projected_history)
+            if tool_steps > self._max_tool_steps_per_turn:
+                logger.warning(
+                    "Tool loop guard triggered: max_tool_steps_per_turn=%s, tool_steps=%s",
+                    self._max_tool_steps_per_turn,
+                    tool_steps,
+                )
+                _emit_status(
+                    config,
+                    f"工具调用已达上限（{self._max_tool_steps_per_turn}），本轮停止继续调用。",
+                )
+                response = AIMessage(
+                    content=(
+                        f"本轮工具调用次数已达上限（{self._max_tool_steps_per_turn}）。"
+                        "我已停止自动重试，建议你补充更明确的目标或约束后我再继续。"
+                    )
+                )
+            else:
+                signature, repeat_count = _same_tool_call_streak(projected_history)
+                if repeat_count >= self._max_same_tool_call_repeats:
+                    logger.warning(
+                        "Tool loop guard triggered: repeated_call=%s, repeat_count=%s",
+                        signature,
+                        repeat_count,
+                    )
+                    _emit_status(
+                        config,
+                        f"检测到重复工具调用（连续 {repeat_count} 次），本轮停止继续调用。",
+                    )
+                    response = AIMessage(
+                        content=(
+                            f"检测到同一工具调用连续重复 {repeat_count} 次。"
+                            "我已停止自动重试，建议调整输入条件或改用其它策略后再继续。"
+                        )
+                    )
+
         if response.tool_calls:
             _emit_status(config, f"准备执行工具调用：{_summarize_tool_calls(response.tool_calls)}")
         else:
@@ -641,6 +740,20 @@ def _resolve_status_callback(config: RunnableConfig | None) -> Callable[[str], N
     return None
 
 
+def _resolve_debug_callback(config: RunnableConfig | None) -> Callable[[str], None] | None:
+    if config is None:
+        return None
+    if not hasattr(config, "get"):
+        return None
+    configurable = config.get("configurable")  # type: ignore[call-arg]
+    if not isinstance(configurable, dict):
+        return None
+    callback = configurable.get("debug_callback")
+    if callable(callback):
+        return callback
+    return None
+
+
 def _emit_status(config: RunnableConfig | None, text: str) -> None:
     normalized = text.strip()
     if not normalized:
@@ -674,20 +787,138 @@ def _invoke_llm_with_optional_stream(
     llm: Any,
     messages: list[AnyMessage],
     token_callback: Callable[[str], None] | None,
+    debug_callback: Callable[[str], None] | None = None,
 ) -> AIMessage:
     if token_callback is None:
         return llm.invoke(messages)
 
+    if debug_callback is not None:
+        debug_callback("completion_start")
     merged: AIMessage | None = None
+    chunk_count = 0
+    chunk_text_count = 0
+    merged_emitted_text = ""
+    emitted_any = False
     for chunk in llm.stream(messages):
-        text = _to_text_content(getattr(chunk, "content", ""))
+        chunk_count += 1
+        merged = chunk if merged is None else (merged + chunk)
+        text = _extract_stream_chunk_text(chunk)
+        if not text:
+            # Nanobot-style behavior: recover incremental text from merged
+            # stream state when provider-specific chunk payload has no direct
+            # text field.
+            merged_text = _to_stream_text_content(getattr(merged, "content", ""))
+            if merged_text and merged_text.startswith(merged_emitted_text):
+                text = merged_text[len(merged_emitted_text):]
+                merged_emitted_text = merged_text
         if text:
             token_callback(text)
-        merged = chunk if merged is None else (merged + chunk)
+            chunk_text_count += 1
+            if debug_callback is not None and not emitted_any:
+                debug_callback("first_token_emitted")
+            emitted_any = True
+        merged_text = _to_stream_text_content(getattr(merged, "content", ""))
+        if merged_text and merged_text.startswith(merged_emitted_text):
+            merged_emitted_text = merged_text
 
     if merged is None:
         return AIMessage(content="")
+    if not emitted_any:
+        # Non-streaming provider behavior: emit the final answer right after
+        # this completion call returns, instead of waiting for the full turn.
+        final_text = _to_stream_text_content(getattr(merged, "content", "")).strip()
+        if final_text:
+            token_callback(final_text)
+            if debug_callback is not None:
+                debug_callback("fallback_emit_final_text")
+    if debug_callback is not None:
+        debug_callback(
+            f"completion_end chunks={chunk_count} chunks_with_text={chunk_text_count} emitted_any={emitted_any}"
+        )
+    logger.info(
+        "LLM stream stats: chunks=%s, chunks_with_text=%s, emitted_any=%s",
+        chunk_count,
+        chunk_text_count,
+        emitted_any,
+    )
     return merged
+
+
+def _extract_stream_chunk_text(chunk: Any) -> str:
+    # Preferred path: LangChain message chunks usually implement text().
+    try:
+        text_method = getattr(chunk, "text", None)
+        if callable(text_method):
+            value = text_method()
+            if isinstance(value, str) and value:
+                return value
+    except Exception:
+        logger.debug("chunk.text() extraction failed", exc_info=True)
+
+    content = getattr(chunk, "content", "")
+    text = _to_stream_text_content(content)
+    if text:
+        return text
+
+    additional = getattr(chunk, "additional_kwargs", None)
+    if additional is not None:
+        text = _to_stream_text_content(additional)
+        if text:
+            return text
+    return ""
+
+
+def _to_stream_text_content(content: Any) -> str:
+    """Extract only text-like stream payload fields, avoiding metadata noise."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        lines: list[str] = []
+        for item in content:
+            extracted = _to_stream_text_content(item)
+            if extracted:
+                lines.append(extracted)
+        return "\n".join(lines)
+    if isinstance(content, dict):
+        block_type = str(content.get("type") or "").lower()
+        if block_type in {"text", "text_delta", "output_text"}:
+            block_text = content.get("text")
+            if isinstance(block_text, str):
+                return block_text
+        text = content.get("text")
+        if isinstance(text, str):
+            return text
+        delta = content.get("delta")
+        if isinstance(delta, str):
+            return delta
+        if isinstance(delta, (dict, list)):
+            delta_text = _to_stream_text_content(delta)
+            if delta_text:
+                return delta_text
+        output_text = content.get("output_text")
+        if isinstance(output_text, str):
+            return output_text
+        choices = content.get("choices")
+        if isinstance(choices, list):
+            lines: list[str] = []
+            for choice in choices:
+                extracted = _to_stream_text_content(choice)
+                if extracted:
+                    lines.append(extracted)
+            if lines:
+                return "\n".join(lines)
+        message = content.get("message")
+        if isinstance(message, (dict, list, str)):
+            message_text = _to_stream_text_content(message)
+            if message_text:
+                return message_text
+        nested = content.get("content")
+        if nested is not None and nested is not content:
+            nested_text = _to_stream_text_content(nested)
+            if nested_text:
+                return nested_text
+        return ""
+    return ""
 
 
 def _summarize_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
@@ -701,6 +932,59 @@ def _summarize_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
     if not names:
         return f"{len(tool_calls)} 个工具"
     return ", ".join(names)
+
+
+def _count_tool_steps_since_last_human(messages: list[AnyMessage]) -> int:
+    count = 0
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, AIMessage) and message.tool_calls:
+            count += 1
+    return count
+
+
+def _same_tool_call_streak(messages: list[AnyMessage]) -> tuple[str, int]:
+    signatures: list[str] = []
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, ToolMessage):
+            continue
+        if isinstance(message, AIMessage) and message.tool_calls:
+            signature = _tool_call_signature(message.tool_calls)
+            if signature:
+                signatures.append(signature)
+            continue
+        break
+
+    if not signatures:
+        return "", 0
+
+    latest = signatures[0]
+    repeat_count = 0
+    for signature in signatures:
+        if signature != latest:
+            break
+        repeat_count += 1
+    return latest, repeat_count
+
+
+def _tool_call_signature(tool_calls: list[dict[str, Any]]) -> str:
+    normalized: list[str] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        name = str(tool_call.get("name") or "").strip()
+        args = tool_call.get("args")
+        if args is None:
+            args = tool_call.get("arguments")
+        try:
+            args_text = json.dumps(args, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            args_text = str(args)
+        normalized.append(f"{name}:{args_text}")
+    return "|".join(normalized)
 
 
 def _build_text_only_retry_messages(
@@ -731,6 +1015,13 @@ def _build_text_only_retry_messages(
     ]
 
 
+def _runtime_error_reply_text() -> str:
+    return (
+        "这次处理出现了临时异常，我没有中断服务。"
+        "请稍后重试，或简化问题后再发一次。"
+    )
+
+
 def _to_text_content(content: Any) -> str:
     """将输入转换为目标格式。
     
@@ -740,12 +1031,50 @@ def _to_text_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return _human_blocks_to_text(content)
+        lines: list[str] = []
+        for item in content:
+            extracted = _to_text_content(item)
+            if extracted:
+                lines.append(extracted)
+        return "\n".join(lines)
     if isinstance(content, dict):
         text = content.get("text")
         if isinstance(text, str):
             return text
-        return str(content)
+        delta = content.get("delta")
+        if isinstance(delta, str):
+            return delta
+        output_text = content.get("output_text")
+        if isinstance(output_text, str):
+            return output_text
+        reasoning = content.get("reasoning_content")
+        if isinstance(reasoning, str):
+            return reasoning
+        completion = content.get("completion")
+        if isinstance(completion, str):
+            return completion
+        message = content.get("message")
+        if isinstance(message, str):
+            return message
+        arguments = content.get("arguments")
+        if isinstance(arguments, str):
+            return arguments
+        nested = content.get("content")
+        if nested is not None and nested is not content:
+            nested_text = _to_text_content(nested)
+            if nested_text:
+                return nested_text
+        # Fallback: recursively scan common text-carrying fields.
+        lines: list[str] = []
+        for key, value in content.items():
+            if key in {"text", "delta", "output_text", "content"}:
+                continue
+            extracted = _to_text_content(value)
+            if extracted:
+                lines.append(extracted)
+        if lines:
+            return "\n".join(lines)
+        return ""
     return str(content)
 
 

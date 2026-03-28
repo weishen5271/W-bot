@@ -52,7 +52,14 @@
     "exposeStepLogs": true,
     "enableOpenClawProfile": true,
     "openClawProfileRootDir": ".",
-    "openClawAutoInit": true
+    "openClawAutoInit": true,
+    "enableConsoleLogs": true,
+    "loopGuard": {
+      "recursionLimit": 20,
+      "maxToolStepsPerTurn": 8,
+      "maxSameToolCallRepeats": 3
+    },
+    "enableStreaming": false
   },
   "agents": {
     "defaults": {

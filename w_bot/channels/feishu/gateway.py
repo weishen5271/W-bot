@@ -26,6 +26,7 @@ from w_bot.agents.short_memory_optimizer import (
     start_short_memory_optimizer_worker,
 )
 from w_bot.agents.skills import SkillsLoader
+from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
 from w_bot.channels.models import InboundMedia, InboundMessage
 
@@ -83,6 +84,7 @@ class FeishuGateway:
         thread_prefix: str,
         media_root_dir: str = "media",
         expose_step_logs: bool = True,
+        recursion_limit: int = 20,
     ) -> None:
         """初始化对象并保存运行所需依赖。
         
@@ -104,6 +106,7 @@ class FeishuGateway:
         self._lark: Any | None = None
         self._media_root = Path(media_root_dir).expanduser()
         self._expose_step_logs = expose_step_logs
+        self._recursion_limit = max(1, int(recursion_limit))
         if not self._media_root.is_absolute():
             self._media_root = Path.cwd() / self._media_root
         self._media_root.mkdir(parents=True, exist_ok=True)
@@ -202,7 +205,9 @@ class FeishuGateway:
             logger.info("Skip message due to allow_from rule: open_id=%s", open_id)
             return
 
-        text = self._extract_text(content_raw=message.get("content"), message_type=message_type)
+        text = sanitize_user_text(
+            self._extract_text(content_raw=message.get("content"), message_type=message_type)
+        )
         media = self._extract_media(
             message_id=message_id,
             message_type=message_type,
@@ -269,7 +274,8 @@ class FeishuGateway:
             "configurable": {
                 "thread_id": session_id,
                 "status_callback": emit_status if self._expose_step_logs else None,
-            }
+            },
+            "recursion_limit": self._recursion_limit,
         }
         media_payload = [item.to_dict() for item in inbound.media]
         prompt_text = _build_inbound_prompt_text(inbound)
@@ -282,22 +288,37 @@ class FeishuGateway:
             ]
         }
         latest_ai_text = ""
+        ai_order: list[str] = []
+        ai_text_by_id: dict[str, str] = {}
 
-        with self._graph_lock:
-            for event in self._graph.stream(inputs, config=config, stream_mode="values"):
-                messages = event.get("messages", []) if isinstance(event, dict) else []
-                if not messages:
-                    continue
-                last = messages[-1]
-                if isinstance(last, AIMessage) and not last.tool_calls:
-                    content = _message_to_text(last.content).strip()
-                    if content:
-                        latest_ai_text = content
+        try:
+            with self._graph_lock:
+                for event in self._graph.stream(inputs, config=config, stream_mode="values"):
+                    messages = event.get("messages", []) if isinstance(event, dict) else []
+                    if not messages:
+                        continue
+                    last = messages[-1]
+                    if isinstance(last, AIMessage) and not last.tool_calls:
+                        msg_id = getattr(last, "id", None) or f"{len(messages)}-thought"
+                        content = _message_to_text(last.content).strip()
+                        if content:
+                            if msg_id not in ai_text_by_id:
+                                ai_order.append(msg_id)
+                            ai_text_by_id[msg_id] = content
+                            latest_ai_text = content
+        except Exception:
+            logger.exception("Failed to process feishu chat round, session_id=%s", session_id)
+            return "本轮处理出现异常，但服务仍在运行。请稍后重试。"
+
+        if ai_order:
+            latest_ai_text = "\n\n".join(
+                ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip()
+            )
 
         if self._expose_step_logs and status_lines:
             status_block = "\n".join(f"- {line}" for line in status_lines)
             if latest_ai_text.strip():
-                return f"步骤状态：\n{status_block}\n\n最终回复：\n{latest_ai_text}"
+                return f"步骤状态：\n{status_block}\n\nAI回复：\n{latest_ai_text}"
             return f"步骤状态：\n{status_block}"
 
         return latest_ai_text
@@ -779,13 +800,11 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
     Args:
         config_path: 目标路径参数，用于定位文件或目录。
     """
-    setup_logging()
-
+    settings = load_settings(config_path=config_path)
+    setup_logging(enable_console_logs=settings.enable_console_logs)
     cfg = load_gateway_config(config_path)
     if not cfg.feishu.enabled:
         logger.warning("Feishu config loaded but channels.feishu.enabled=false")
-
-    settings = load_settings(config_path=config_path)
     logger.info("Building graph for Feishu gateway")
 
     try:
@@ -869,6 +888,8 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             image_model_name=settings.model_routing.image_model_name,
             audio_model_name=settings.model_routing.audio_model_name,
             token_optimization_settings=settings.token_optimization,
+            max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
+            max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
         ).app
 
         gateway = FeishuGateway(
@@ -877,6 +898,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             thread_prefix=cfg.thread_prefix,
             media_root_dir=settings.multimodal.media_root_dir,
             expose_step_logs=settings.expose_step_logs,
+            recursion_limit=settings.loop_guard.recursion_limit,
         )
         try:
             gateway.start()

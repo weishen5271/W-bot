@@ -6,12 +6,11 @@ import time
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
-from rich.panel import Panel
 
-from .agent import WBotGraph, message_kind
+from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
 from .config import Settings, load_settings
 from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
@@ -21,6 +20,7 @@ from .short_memory_optimizer import (
     start_short_memory_optimizer_worker,
 )
 from .skills import SkillsLoader
+from .text_sanitizer import sanitize_user_text
 from .tools.runtime import build_tools
 
 console = Console()
@@ -74,9 +74,6 @@ def run_cli(config_path: str = "configs/app.json") -> None:
     Args:
         config_path: 目标路径参数，用于定位文件或目录。
     """
-    setup_logging()
-    logger.info("Starting W-bot CLI runtime")
-
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -87,6 +84,8 @@ def run_cli(config_path: str = "configs/app.json") -> None:
         ) from exc
 
     settings = load_settings(config_path=config_path)
+    setup_logging(enable_console_logs=settings.enable_console_logs)
+    logger.info("Starting W-bot CLI runtime")
     llm_text = build_llm(settings, model_name=settings.model_routing.text_model_name)
     llm_image = (
         build_llm(settings, model_name=settings.model_routing.image_model_name)
@@ -162,6 +161,8 @@ def run_cli(config_path: str = "configs/app.json") -> None:
             image_model_name=settings.model_routing.image_model_name,
             audio_model_name=settings.model_routing.audio_model_name,
             token_optimization_settings=settings.token_optimization,
+            max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
+            max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
         ).app
 
         logger.info("Graph ready, entering REPL loop")
@@ -208,103 +209,121 @@ def _repl(graph: Any, settings: Settings) -> None:
         f"[bold green]Current session:[/bold green] {current_session_id}  ([bold]/new[/bold] for new session)"
     )
 
-    seen_message_ids: set[str] = set()
-    _render_existing_session_history(
-        graph=graph,
-        session_id=current_session_id,
-        seen_message_ids=seen_message_ids,
-    )
+    _render_existing_session_history(graph=graph, session_id=current_session_id)
 
     while True:
-        user_text = input("\nYou > ").strip()
-        if not user_text:
+        user_text = sanitize_user_text(input("\nYou > "))
+        if not user_text.strip():
             continue
 
-        if user_text.lower() == "/new":
+        if user_text.strip().lower() == "/new":
             current_session_id = datetime.now().strftime("cli_session_%Y%m%d_%H%M%S")
             session_store.save(current_session_id)
-            seen_message_ids.clear()
             logger.info("Created new session via /new: %s", current_session_id)
             console.print(f"[bold green]Started new session:[/bold green] {current_session_id}")
             continue
 
-        if user_text.lower() in {"quit", "exit"}:
+        if user_text.strip().lower() in {"quit", "exit"}:
             logger.info("User requested exit")
             console.print("[bold yellow]Session closed.[/bold yellow]")
             return
 
         logger.info("Received user input, len=%s", len(user_text))
-        stream_state = {
-            "started": False,
-            "token_count": 0,
-        }
-
         print("Wbot is thinking....", flush=True)
+        token_state = {
+            "started": False,
+            "emitted_text": "",
+            "pending_text": "",
+            "last_flush_at": time.monotonic(),
+        }
+        latest_ai_text = ""
+        seen_action_ids: set[str] = set()
+        seen_text_ids: set[str] = set()
 
         def emit_status(text: str) -> None:
-            normalized = text.strip()
-            if normalized:
-                logger.info("CLI step status: session_id=%s status=%s", current_session_id, normalized)
-                console.print(f"[dim][Status][/dim] {normalized}")
+            # CLI 默认仅展示模型正文流，不展示中间状态。
+            _ = text
 
         def emit_token(text: str) -> None:
-            token = text or ""
-            if not token:
+            payload = text or ""
+            if not payload:
                 return
-            if not stream_state["started"]:
-                stream_state["started"] = True
+            delta = payload
+            emitted = token_state["emitted_text"]
+            if emitted and payload.startswith(emitted):
+                delta = payload[len(emitted):]
+            if not delta:
+                return
+            if not token_state["started"]:
+                token_state["started"] = True
                 print("W-bot > ", end="", flush=True)
-            stream_state["token_count"] += len(token)
-            print(token, end="", flush=True)
+            token_state["emitted_text"] += delta
+            token_state["pending_text"] += delta
+            _flush_cli_stream_buffer(token_state, force=False)
 
         config = {
             "configurable": {
                 "thread_id": current_session_id,
-                "token_callback": emit_token,
                 "status_callback": emit_status if settings.expose_step_logs else None,
-            }
+                "token_callback": emit_token,
+            },
+            "recursion_limit": settings.loop_guard.recursion_limit,
         }
         inputs = {"messages": [HumanMessage(content=user_text)]}
 
-        for event in graph.stream(inputs, config=config, stream_mode="values"):
-            messages = event.get("messages", [])
-            if not messages:
-                continue
-            last = messages[-1]
-            kind = message_kind(last)
-            msg_id = getattr(last, "id", None) or f"{len(messages)}-{message_kind(last)}"
-            if msg_id in seen_message_ids:
-                continue
-            seen_message_ids.add(msg_id)
-            if kind == "thought" and stream_state["token_count"] > 0:
-                continue
-            if kind == "thought" and stream_state["token_count"] == 0:
-                text = _message_to_text(last)
-                if text.strip():
-                    stream_state["started"] = True
-                    stream_state["token_count"] += len(text)
-                    console.print("[bold cyan]W-bot > [/bold cyan]", end="")
-                    _stream_text_to_console(text)
+        set_runtime_callbacks(token_callback=emit_token, debug_callback=None)
+        try:
+            for event in graph.stream(inputs, config=config, stream_mode="values"):
+                messages = event.get("messages", []) if isinstance(event, dict) else []
+                if not messages:
                     continue
-            logger.debug("Rendering message: kind=%s, id=%s", kind, msg_id)
-            _render_message(last)
+                last = messages[-1]
+                msg_id = str(getattr(last, "id", "") or f"{len(messages)}-{type(last).__name__}")
+                if isinstance(last, AIMessage) and last.tool_calls:
+                    if msg_id not in seen_action_ids:
+                        _flush_cli_stream_buffer(token_state, force=True)
+                        seen_action_ids.add(msg_id)
+                        print(
+                            f"\n[LLM] tool_calls -> {', '.join(str(tc.get('name', '')).strip() or 'unknown' for tc in last.tool_calls)}",
+                            flush=True,
+                        )
+                if isinstance(last, AIMessage) and not last.tool_calls:
+                    text = _message_to_text(last).strip()
+                    if not text:
+                        continue
+                    latest_ai_text = text
+                    if not token_state["started"] and msg_id not in seen_text_ids:
+                        seen_text_ids.add(msg_id)
+                        print(f"W-bot > {text}", flush=True)
+        except Exception:
+            logger.exception("Conversation round failed but REPL will continue")
+            console.print(
+                "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]"
+            )
+            continue
+        finally:
+            clear_runtime_callbacks()
 
-        if stream_state["started"]:
-            console.print()
+        _flush_cli_stream_buffer(token_state, force=True)
+        if token_state["started"]:
+            print("", flush=True)
+        elif latest_ai_text:
+            print(f"W-bot > {latest_ai_text}", flush=True)
+        else:
+            print("W-bot > 我收到了你的消息，但暂时没有生成可用回复。", flush=True)
 
 
 def _render_existing_session_history(
     *,
     graph: Any,
     session_id: str,
-    seen_message_ids: set[str],
 ) -> None:
     """将数据渲染为目标文本或展示格式。
     
     Args:
         graph: 对话图执行器实例。
         session_id: 业务对象唯一标识。
-        seen_message_ids: 消息相关参数，用于定位或处理消息。
+        seen_message_signatures: 消息签名集合，用于去重渲染。
     """
     config = {"configurable": {"thread_id": session_id}}
     try:
@@ -319,44 +338,11 @@ def _render_existing_session_history(
         console.print("[dim]No previous messages in this session.[/dim]")
         return
 
-    console.print(f"[bold cyan]Restored {len(messages)} message(s) from previous session:[/bold cyan]")
-    for idx, message in enumerate(messages, start=1):
-        msg_id = getattr(message, "id", None) or f"{idx}-{message_kind(message)}"
-        seen_message_ids.add(msg_id)
-        _render_message(message)
-
-
-def _render_message(message: Any) -> None:
-    """将数据渲染为目标文本或展示格式。
-    
-    Args:
-        message: 单条消息对象。
-    """
-    kind = message_kind(message)
-    title = {
-        "thought": "Thought",
-        "action": "Action",
-        "tool": "Observation",
-        "human": "Human",
-    }.get(kind, "Message")
-
-    style = {
-        "thought": "cyan",
-        "action": "magenta",
-        "tool": "green",
-        "human": "white",
-    }.get(kind, "white")
-
-    content = _message_to_text(message)
-
-    if kind == "action":
-        content = f"{content}\n\nTool Calls: {message.tool_calls}"
-
-    console.print(Panel(content, title=title, border_style=style, expand=True))
+    console.print(f"[bold cyan]Restored {len(messages)} message(s) from previous session.[/bold cyan]")
 
 
 def _message_to_text(message: Any) -> str:
-    content = getattr(message, "content", "")
+    content = getattr(message, "content", message)
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -377,14 +363,18 @@ def _message_to_text(message: Any) -> str:
     return str(content)
 
 
-def _stream_text_to_console(text: str, *, chunk_size: int = 4, delay_seconds: float = 0.03) -> None:
-    payload = text or ""
-    if not payload:
-        print("", flush=True)
+def _flush_cli_stream_buffer(token_state: dict[str, Any], *, force: bool) -> None:
+    pending = str(token_state.get("pending_text") or "")
+    if not pending:
         return
-    for idx in range(0, len(payload), chunk_size):
-        print(payload[idx: idx + chunk_size], end="", flush=True)
-        time.sleep(delay_seconds)
+    now = time.monotonic()
+    last_flush_at = float(token_state.get("last_flush_at") or 0.0)
+    should_flush = force or ("\n" in pending) or (now - last_flush_at >= 0.05)
+    if not should_flush:
+        return
+    print(pending, end="", flush=True)
+    token_state["pending_text"] = ""
+    token_state["last_flush_at"] = now
 
 
 if __name__ == "__main__":

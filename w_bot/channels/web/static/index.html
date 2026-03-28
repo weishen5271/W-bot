@@ -274,10 +274,13 @@
     addMessage("user", text);
     inputEl.value = "";
     const statusMsgEl = addMessage("system", "Wbot is thinking....");
-    const botMsgEl = addMessage("bot", "");
+    const botMessageById = new Map();
+    let activeBotMsgEl = null;
 
-    const pendingTokenQueue = [];
-    let drainingTokens = false;
+    let streamText = "";
+    let pendingRenderText = "";
+    let lastRenderAt = performance.now();
+    const renderIntervalMs = 50;
     let thinkingTimer = null;
     const thinkingFrames = [
       "Wbot is thinking.",
@@ -305,31 +308,29 @@
 
     startThinking();
 
-    function sleep(ms) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
-    async function drainTokens() {
-      if (drainingTokens) return;
-      drainingTokens = true;
-      try {
-        while (pendingTokenQueue.length > 0) {
-          const payload = pendingTokenQueue.shift() || "";
-          for (let i = 0; i < payload.length; i += 3) {
-            botMsgEl.textContent += payload.slice(i, i + 3);
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-            await sleep(8);
-          }
-        }
-      } finally {
-        drainingTokens = false;
+    function flushRender(force = false) {
+      if (!pendingRenderText) return;
+      const now = performance.now();
+      if (!force && !pendingRenderText.includes("\n") && now - lastRenderAt < renderIntervalMs) {
+        return;
       }
+      if (!activeBotMsgEl) {
+        activeBotMsgEl = addMessage("bot", "");
+      }
+      streamText += pendingRenderText;
+      pendingRenderText = "";
+      activeBotMsgEl.textContent = streamText;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      lastRenderAt = now;
     }
 
     function enqueueToken(textChunk) {
       if (!textChunk) return;
-      pendingTokenQueue.push(textChunk);
-      drainTokens();
+      if (!activeBotMsgEl) {
+        activeBotMsgEl = addMessage("bot", "");
+      }
+      pendingRenderText += textChunk;
+      flushRender(false);
     }
 
     try {
@@ -357,6 +358,7 @@
         const {value, done} = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, {stream: true});
+        buffer = buffer.replace(/\r\n/g, "\n");
 
         let boundary = buffer.indexOf("\n\n");
         while (boundary !== -1) {
@@ -372,7 +374,7 @@
             if (line.startsWith("event:")) {
               event = line.slice(6).trim();
             } else if (line.startsWith("data:")) {
-              data += line.slice(5).trim();
+              data += line.slice(5).trimStart();
             }
           }
 
@@ -395,7 +397,45 @@
               stopThinking();
               statusMsgEl.textContent = pendingStatusText || "步骤状态: 正在生成回复...";
             }
+            if (parsed.stream_id) {
+              botMessageById.set(String(parsed.stream_id), activeBotMsgEl || addMessage("bot", ""));
+              activeBotMsgEl = botMessageById.get(String(parsed.stream_id));
+            }
             enqueueToken(parsed.text);
+          } else if (event === "stream_meta") {
+            if (parsed.stream_id) {
+              const msgId = String(parsed.stream_id);
+              if (parsed._resuming) {
+                if (!botMessageById.has(msgId)) {
+                  botMessageById.set(msgId, activeBotMsgEl || addMessage("bot", ""));
+                }
+                activeBotMsgEl = botMessageById.get(msgId);
+              }
+            }
+            if (parsed._stream_end) {
+              flushRender(true);
+            }
+          } else if (event === "ai_message" && parsed.text) {
+            hasToken = true;
+            stopThinking();
+            statusMsgEl.textContent = pendingStatusText || "步骤状态: 正在生成回复...";
+            const msgId = String(parsed.id || "");
+            const msgText = String(parsed.text || "");
+            if (!msgText) {
+              continue;
+            }
+            flushRender(true);
+            if (msgId && botMessageById.has(msgId)) {
+              const existing = botMessageById.get(msgId);
+              existing.textContent = msgText;
+              activeBotMsgEl = existing;
+            } else {
+              const nextEl = addMessage("bot", msgText);
+              if (msgId) {
+                botMessageById.set(msgId, nextEl);
+              }
+              activeBotMsgEl = nextEl;
+            }
           } else if (event === "status" && parsed.text) {
             pendingStatusText = `步骤状态: ${parsed.text}`;
             if (hasToken) {
@@ -404,6 +444,7 @@
           } else if (event === "done") {
             finalReply = parsed.reply || finalReply;
             stopThinking();
+            flushRender(true);
             statusMsgEl.textContent = "步骤状态: 处理完成。";
           } else if (event === "error") {
             throw new Error(parsed.message || "流式请求失败");
@@ -411,20 +452,24 @@
         }
       }
 
-      while (drainingTokens || pendingTokenQueue.length > 0) {
-        await sleep(10);
-      }
+      flushRender(true);
 
-      if (!botMsgEl.textContent && finalReply) {
-        enqueueToken(finalReply);
-        while (drainingTokens || pendingTokenQueue.length > 0) {
-          await sleep(10);
+      if ((!activeBotMsgEl || !activeBotMsgEl.textContent) && finalReply) {
+        streamText = finalReply;
+        if (!activeBotMsgEl) {
+          activeBotMsgEl = addMessage("bot", streamText);
+        } else {
+          activeBotMsgEl.textContent = streamText;
         }
       }
     } catch (err) {
       stopThinking();
-      botMsgEl.className = "msg system";
-      botMsgEl.textContent = `错误: ${err.message || String(err)}`;
+      if (!activeBotMsgEl) {
+        activeBotMsgEl = addMessage("system", "");
+      } else {
+        activeBotMsgEl.className = "msg system";
+      }
+      activeBotMsgEl.textContent = `错误: ${err.message || String(err)}`;
       statusMsgEl.textContent = "步骤状态: 失败。";
     } finally {
       stopThinking();
