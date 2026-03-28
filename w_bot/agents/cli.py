@@ -179,13 +179,16 @@ def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
         settings: 全局设置对象。
         model_name: 当前使用的模型名称。
     """
-    return ChatOpenAI(
-        model=model_name,
-        api_key=settings.dashscope_api_key,
-        base_url=settings.bailian_base_url,
-        temperature=0.2,
-        streaming=True,
-    )
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "api_key": settings.llm_api_key,
+        "base_url": settings.llm_base_url,
+        "temperature": settings.llm_temperature,
+        "streaming": True,
+    }
+    if settings.llm_extra_headers:
+        kwargs["default_headers"] = settings.llm_extra_headers
+    return ChatOpenAI(**kwargs)
 
 
 def _repl(graph: Any, settings: Settings) -> None:

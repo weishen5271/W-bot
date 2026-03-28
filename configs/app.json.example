@@ -1,8 +1,5 @@
 {
   "agent": {
-    "dashscopeApiKey": "<your_dashscope_api_key>",
-    "bailianBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "bailianModelName": "qwen-plus",
     "tavilyApiKey": "",
     "postgresDsn": "postgresql://<user>:<password>@<host>:5432/<database>",
     "milvusUri": "http://<host>:19530",
@@ -56,6 +53,130 @@
     "enableOpenClawProfile": true,
     "openClawProfileRootDir": ".",
     "openClawAutoInit": true
+  },
+  "agents": {
+    "defaults": {
+      "provider": "dashscope",
+      "model": "qwen-plus",
+      "temperature": 0.2
+    }
+  },
+  "providers": {
+    "custom": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "azureOpenai": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "anthropic": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "openai": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "openrouter": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "deepseek": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "groq": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "zhipu": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "dashscope": {
+      "apiKey": "<your_dashscope_api_key>",
+      "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "extraHeaders": null
+    },
+    "vllm": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "ollama": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "ovms": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "gemini": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "moonshot": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "minimax": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "mistral": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "stepfun": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "aihubmix": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "siliconflow": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "volcengine": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "volcengineCodingPlan": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "byteplus": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    },
+    "byteplusCodingPlan": {
+      "apiKey": "",
+      "apiBase": "",
+      "extraHeaders": null
+    }
   },
   "channels": {
     "feishu": {

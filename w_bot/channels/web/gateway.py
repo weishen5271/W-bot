@@ -421,13 +421,16 @@ def _write_default_config(target: Path) -> None:
 def _build_llm(settings: Any, *, model_name: str) -> Any:
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(
-        model=model_name,
-        api_key=settings.dashscope_api_key,
-        base_url=settings.bailian_base_url,
-        temperature=0.2,
-        streaming=True,
-    )
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "api_key": settings.llm_api_key,
+        "base_url": settings.llm_base_url,
+        "temperature": settings.llm_temperature,
+        "streaming": True,
+    }
+    if settings.llm_extra_headers:
+        kwargs["default_headers"] = settings.llm_extra_headers
+    return ChatOpenAI(**kwargs)
 
 
 def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:

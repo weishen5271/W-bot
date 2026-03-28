@@ -15,6 +15,11 @@ DEFAULT_APP_CONFIG_PATH = "configs/app.json"
 
 @dataclass(frozen=True)
 class Settings:
+    model_provider: str
+    llm_api_key: str
+    llm_base_url: str
+    llm_extra_headers: dict[str, str]
+    llm_temperature: float
     dashscope_api_key: str
     bailian_base_url: str
     bailian_model_name: str
@@ -96,10 +101,20 @@ def load_settings(
     """
     payload = _load_or_create_app_config(config_path)
     agent_cfg = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+    agents_cfg = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
+    agents_defaults = (
+        agents_cfg.get("defaults") if isinstance(agents_cfg.get("defaults"), dict) else {}
+    )
+    providers_payload = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
 
     merged = dict(agent_cfg)
     if overrides:
         merged.update(overrides)
+    model_provider = _string_value(agents_defaults, "provider", default="dashscope")
+    model_name_from_defaults = _string_value(agents_defaults, "model", default="qwen-plus")
+    temperature = _float_value(agents_defaults, "temperature", default=0.2)
+    provider_payload = _dict_value(providers_payload, model_provider)
+    active_provider = provider_payload
     model_routing_payload = (
         merged.get("modelRouting") if isinstance(merged.get("modelRouting"), dict) else {}
     )
@@ -114,18 +129,27 @@ def load_settings(
     )
 
     settings = Settings(
-        dashscope_api_key=_must_value(merged, "dashscopeApiKey", "dashscope_api_key"),
+        model_provider=model_provider,
+        llm_api_key=_must_value(active_provider, "apiKey", "api_key"),
+        llm_base_url=_string_value(
+            active_provider,
+            "apiBase",
+            "api_base",
+            default="",
+        ),
+        llm_extra_headers=_header_dict_value(active_provider, "extraHeaders", "extra_headers", default={}),
+        llm_temperature=temperature,
+        dashscope_api_key=_must_value(active_provider, "apiKey", "api_key"),
         bailian_base_url=_string_value(
-            merged,
-            "bailianBaseUrl",
-            "bailian_base_url",
-            default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            active_provider,
+            "apiBase",
+            "api_base",
+            default="",
         ),
         bailian_model_name=_string_value(
-            merged,
-            "bailianModelName",
-            "bailian_model_name",
-            default="qwen-plus",
+            agents_defaults,
+            "model",
+            default=model_name_from_defaults,
         ),
         tavily_api_key=_string_value(merged, "tavilyApiKey", "tavily_api_key", default=""),
         postgres_dsn=_must_value(merged, "postgresDsn", "postgres_dsn"),
@@ -176,10 +200,9 @@ def load_settings(
                 "textModelName",
                 "text_model_name",
                 default=_string_value(
-                    merged,
-                    "bailianModelName",
-                    "bailian_model_name",
-                    default="qwen-plus",
+                    agents_defaults,
+                    "model",
+                    default=model_name_from_defaults,
                 ),
             ),
             image_model_name=_string_value(
@@ -310,8 +333,9 @@ def load_settings(
         ),
     )
     logger.info(
-        "Settings loaded from %s: model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
+        "Settings loaded from %s: provider=%s, model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
         config_path,
+        settings.model_provider,
         settings.bailian_model_name,
         settings.session_id,
         settings.user_id,
@@ -355,9 +379,6 @@ def default_app_config() -> dict[str, Any]:
     """
     return {
         "agent": {
-            "dashscopeApiKey": "",
-            "bailianBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "bailianModelName": "qwen-plus",
             "tavilyApiKey": "",
             "postgresDsn": "",
             "milvusUri": "http://<host>:19530",
@@ -412,6 +433,14 @@ def default_app_config() -> dict[str, Any]:
             "openClawProfileRootDir": ".",
             "openClawAutoInit": True,
         },
+        "agents": {
+            "defaults": {
+                "provider": "dashscope",
+                "model": "qwen-plus",
+                "temperature": 0.2,
+            }
+        },
+        "providers": _default_provider_configs(),
         "channels": {
             "feishu": {
                 "enabled": True,
@@ -434,6 +463,38 @@ def default_app_config() -> dict[str, Any]:
     }
 
 
+def _default_provider_configs() -> dict[str, dict[str, Any]]:
+    return {
+        "custom": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "azureOpenai": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "anthropic": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "openai": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "openrouter": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "deepseek": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "groq": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "zhipu": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "dashscope": {
+            "apiKey": "",
+            "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "extraHeaders": None,
+        },
+        "vllm": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "ollama": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "ovms": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "gemini": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "moonshot": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "minimax": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "mistral": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "stepfun": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "aihubmix": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "siliconflow": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "volcengine": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "volcengineCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "byteplus": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "byteplusCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+    }
+
+
 def _pick(data: dict[str, Any], *keys: str) -> Any:
     """处理pick相关逻辑并返回结果。
     
@@ -445,6 +506,13 @@ def _pick(data: dict[str, Any], *keys: str) -> Any:
         if key in data:
             return data[key]
     return None
+
+
+def _dict_value(data: dict[str, Any], *keys: str) -> dict[str, Any]:
+    value = _pick(data, *keys)
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 def _must_value(data: dict[str, Any], *keys: str) -> str:
@@ -520,3 +588,27 @@ def _list_value(data: dict[str, Any], *keys: str, default: list[Any]) -> list[An
     if isinstance(value, list):
         return value
     return list(default)
+
+
+def _float_value(data: dict[str, Any], *keys: str, default: float) -> float:
+    value = _pick(data, *keys)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid float config for %s, fallback=%s", "/".join(keys), default)
+        return default
+
+
+def _header_dict_value(data: dict[str, Any], *keys: str, default: dict[str, str]) -> dict[str, str]:
+    value = _pick(data, *keys)
+    if not isinstance(value, dict):
+        return dict(default)
+    out: dict[str, str] = {}
+    for key, item in value.items():
+        k = str(key).strip()
+        v = str(item).strip()
+        if k and v:
+            out[k] = v
+    return out
