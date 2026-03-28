@@ -57,6 +57,14 @@ Feishu gateway mode:
 python main.py feishu --config configs/app.json
 ```
 
+Web UI mode:
+
+```bash
+python main.py web --config configs/app.json
+```
+
+Then open: `http://127.0.0.1:8000`
+
 If `configs/app.json` does not exist, the app will auto-generate a template file.
 Fill `channels.feishu.appId` and `channels.feishu.appSecret` before restarting.
 
@@ -122,4 +130,5 @@ To use it, make sure:
 - `w_bot/agents/skills.py`: skill discovery, availability checks, and summary rendering.
 - `w_bot/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
 - `w_bot/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
+- `w_bot/channels/web/gateway.py`: Web channel gateway (HTTP API + built-in chat page).
 - `configs/app.json`: unified app configuration (`agent + channels`).

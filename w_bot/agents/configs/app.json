@@ -23,7 +23,8 @@
       "maxRecentUserTurns": 6,
       "summaryTriggerMessages": 12,
       "summaryMaxChars": 1200
-    }
+    },
+    "exposeStepLogs": true
   },
   "channels": {
     "feishu": {

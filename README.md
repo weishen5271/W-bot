@@ -57,6 +57,14 @@ python main.py cli --config configs/app.json
 python main.py feishu --config configs/app.json
 ```
 
+Web 页面模式：
+
+```bash
+python main.py web --config configs/app.json
+```
+
+启动后打开浏览器访问：`http://127.0.0.1:8000`
+
 如果 `configs/app.json` 不存在，程序会自动生成模板文件。
 重启前请先填写 `channels.feishu.appId` 和 `channels.feishu.appSecret`。
 
@@ -129,4 +137,5 @@ Skill 依赖从 frontmatter 元数据读取：
 - `w_bot/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
 - `w_bot/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
 - `w_bot/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。
+- `w_bot/channels/web/gateway.py`：Web 通道网关（HTTP API + 内置聊天页面）。
 - `configs/app.json`：统一应用配置（`agent + channels`）。

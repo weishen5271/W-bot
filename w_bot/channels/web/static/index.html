@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>W-bot Web Chat</title>
+  <style>
+    :root {
+      --bg: #f4f8ff;
+      --panel: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --primary: #0369a1;
+      --primary-strong: #075985;
+      --border: #cbd5e1;
+      --bot: #e0f2fe;
+      --user: #dcfce7;
+      --shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at 0 0, #e0f2fe 0%, transparent 45%),
+        radial-gradient(circle at 100% 100%, #dbeafe 0%, transparent 45%),
+        var(--bg);
+      display: flex;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .app {
+      width: min(920px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 85vh;
+    }
+
+    .header {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: linear-gradient(90deg, #e0f2fe, #f0f9ff);
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0.2px;
+    }
+
+    .session {
+      color: var(--muted);
+      font-size: 13px;
+      max-width: 56%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .btn {
+      border: 1px solid var(--primary);
+      background: var(--primary);
+      color: #fff;
+      border-radius: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.16s ease;
+    }
+
+    .btn:hover {
+      background: var(--primary-strong);
+      border-color: var(--primary-strong);
+    }
+
+    .messages {
+      flex: 1;
+      overflow: auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .msg {
+      max-width: 82%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      animation: fadeIn 0.18s ease;
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: var(--user);
+    }
+
+    .msg.bot {
+      align-self: flex-start;
+      background: var(--bot);
+    }
+
+    .msg.system {
+      align-self: center;
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .composer {
+      border-top: 1px solid var(--border);
+      padding: 14px;
+      display: flex;
+      gap: 10px;
+      background: #f8fafc;
+    }
+
+    textarea {
+      flex: 1;
+      min-height: 52px;
+      max-height: 140px;
+      resize: vertical;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      padding: 10px;
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+    }
+
+    textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(3, 105, 161, 0.12);
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 640px) {
+      body {
+        padding: 10px;
+      }
+      .app {
+        min-height: 92vh;
+      }
+      .header {
+        flex-wrap: wrap;
+      }
+      .session {
+        max-width: 100%;
+      }
+      .msg {
+        max-width: 92%;
+      }
+      .composer {
+        flex-direction: column;
+      }
+      .btn {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>W-bot Web</h1>
+    <div class="session" id="sessionText">session: -</div>
+    <button class="btn" id="newSessionBtn" type="button">新会话</button>
+  </div>
+  <div class="messages" id="messages"></div>
+  <div class="composer">
+    <textarea id="input" placeholder="输入你的问题，按 Enter 发送，Shift+Enter 换行"></textarea>
+    <button class="btn" id="sendBtn" type="button">发送</button>
+  </div>
+</div>
+
+<script>
+  const messagesEl = document.getElementById("messages");
+  const inputEl = document.getElementById("input");
+  const sendBtn = document.getElementById("sendBtn");
+  const newSessionBtn = document.getElementById("newSessionBtn");
+  const sessionText = document.getElementById("sessionText");
+  const STORAGE_KEY = "w_bot_web_session_id";
+  let sessionId = localStorage.getItem(STORAGE_KEY) || "";
+  let sending = false;
+
+  function addMessage(role, content) {
+    const div = document.createElement("div");
+    div.className = `msg ${role}`;
+    div.textContent = content;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return div;
+  }
+
+  function updateSessionView() {
+    sessionText.textContent = `session: ${sessionId || "-"}`;
+  }
+
+  async function createSessionAndLoadHistory() {
+    const res = await fetch("/api/session/new", {method: "POST"});
+    if (!res.ok) throw new Error("新建会话失败");
+    const data = await res.json();
+    sessionId = data.session_id;
+    localStorage.setItem(STORAGE_KEY, sessionId);
+    updateSessionView();
+    messagesEl.innerHTML = "";
+    addMessage("system", "已创建新会话。");
+  }
+
+  async function loadHistory() {
+    if (!sessionId) {
+      await createSessionAndLoadHistory();
+      return;
+    }
+    const res = await fetch(`/api/history?session_id=${encodeURIComponent(sessionId)}`);
+    if (!res.ok) {
+      await createSessionAndLoadHistory();
+      return;
+    }
+    const data = await res.json();
+    messagesEl.innerHTML = "";
+    let count = 0;
+    for (const msg of data.messages || []) {
+      if (msg.role === "human") {
+        addMessage("user", msg.content || "");
+        count += 1;
+      } else if (msg.role === "thought") {
+        addMessage("bot", msg.content || "");
+        count += 1;
+      }
+    }
+    if (count === 0) {
+      addMessage("system", "欢迎使用 W-bot Web 对话。");
+    } else {
+      addMessage("system", "已恢复历史会话。");
+    }
+  }
+
+  async function sendMessage() {
+    if (sending) return;
+    const text = inputEl.value.trim();
+    if (!text) return;
+    sending = true;
+    sendBtn.disabled = true;
+    addMessage("user", text);
+    inputEl.value = "";
+    const botMsgEl = addMessage("bot", "");
+
+    try {
+      const res = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({message: text, session_id: sessionId || null}),
+      });
+      if (!res.ok) {
+        const info = await res.json().catch(() => ({}));
+        throw new Error(info.detail || "请求失败");
+      }
+
+      if (!res.body) {
+        throw new Error("浏览器不支持流式响应");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let finalReply = "";
+
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf("\n\n");
+
+          if (!block.trim()) continue;
+          const lines = block.split("\n");
+          let event = "";
+          let data = "";
+          for (const line of lines) {
+            if (line.startsWith("event:")) {
+              event = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              data += line.slice(5).trim();
+            }
+          }
+
+          let parsed = {};
+          if (data) {
+            parsed = JSON.parse(data);
+          }
+
+          if (event === "session" && parsed.session_id) {
+            sessionId = parsed.session_id;
+            localStorage.setItem(STORAGE_KEY, sessionId);
+            updateSessionView();
+          } else if (event === "token" && parsed.text) {
+            botMsgEl.textContent += parsed.text;
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          } else if (event === "status" && parsed.text) {
+            addMessage("system", `步骤状态: ${parsed.text}`);
+          } else if (event === "done") {
+            finalReply = parsed.reply || finalReply;
+          } else if (event === "error") {
+            throw new Error(parsed.message || "流式请求失败");
+          }
+        }
+      }
+
+      if (!botMsgEl.textContent && finalReply) {
+        botMsgEl.textContent = finalReply;
+      }
+    } catch (err) {
+      botMsgEl.className = "msg system";
+      botMsgEl.textContent = `错误: ${err.message || String(err)}`;
+    } finally {
+      sending = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener("click", sendMessage);
+  newSessionBtn.addEventListener("click", createSessionAndLoadHistory);
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  updateSessionView();
+  loadHistory().catch((err) => addMessage("system", `初始化失败: ${err.message || String(err)}`));
+  inputEl.focus();
+</script>
+</body>
+</html>

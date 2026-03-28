@@ -51,7 +51,8 @@
       "maxCheckpointsPerThread": 400,
       "archiveBeforeDelete": true,
       "compressLevel": 6
-    }
+    },
+    "exposeStepLogs": true
   },
   "channels": {
     "feishu": {
@@ -66,6 +67,11 @@
       "groupPolicy": "mention",
       "replyToMessage": true,
       "reactEmoji": "THUMBSUP"
+    },
+    "web": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 8000
     }
   },
   "threadPrefix": "feishu"

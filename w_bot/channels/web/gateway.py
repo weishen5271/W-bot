@@ -1,0 +1,459 @@
+from __future__ import annotations
+
+import argparse
+import json
+import queue
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import BaseModel
+
+from w_bot.agents.agent import message_kind
+from w_bot.agents.agent import WBotGraph
+from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.logging_config import get_logger, setup_logging
+from w_bot.agents.memory import LongTermMemoryStore
+from w_bot.agents.short_memory_optimizer import (
+    ShortTermMemoryOptimizationSettings,
+    start_short_memory_optimizer_worker,
+)
+from w_bot.agents.skills import SkillsLoader
+from w_bot.agents.tools.runtime import build_tools
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class WebConfig:
+    enabled: bool
+    host: str
+    port: int
+
+    @staticmethod
+    def from_dict(payload: dict[str, Any]) -> "WebConfig":
+        return WebConfig(
+            enabled=bool(_pick(payload, "enabled", default=True)),
+            host=str(_pick(payload, "host", default="127.0.0.1")).strip() or "127.0.0.1",
+            port=_safe_port(_pick(payload, "port", default=8000)),
+        )
+
+
+@dataclass(frozen=True)
+class GatewayConfig:
+    web: WebConfig
+    thread_prefix: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    reply: str
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+
+
+class HistoryResponse(BaseModel):
+    session_id: str
+    messages: list[dict[str, str]]
+
+
+def run_web_gateway(config_path: str = "configs/app.json") -> None:
+    setup_logging()
+    cfg = load_gateway_config(config_path)
+    settings = load_settings(config_path=config_path)
+    logger.info("Building graph for Web gateway")
+
+    if not cfg.web.enabled:
+        logger.warning("Web config loaded but channels.web.enabled=false")
+
+    try:
+        from langgraph.checkpoint.postgres import PostgresSaver
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        logger.exception("Failed to import PostgresSaver")
+        raise RuntimeError(
+            "PostgresSaver import failed. Please install psycopg first: pip install 'psycopg[binary]'"
+        ) from exc
+
+    llm_text = _build_llm(settings, model_name=settings.model_routing.text_model_name)
+    llm_image = (
+        _build_llm(settings, model_name=settings.model_routing.image_model_name)
+        if settings.model_routing.image_model_name
+        else None
+    )
+    llm_audio = (
+        _build_llm(settings, model_name=settings.model_routing.audio_model_name)
+        if settings.model_routing.audio_model_name
+        else None
+    )
+    memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
+    skills_loader = (
+        SkillsLoader(
+            workspace_skills_dir=settings.skills_workspace_dir,
+            builtin_skills_dir=settings.skills_builtin_dir or None,
+        )
+        if settings.enable_skills
+        else None
+    )
+    tools = build_tools(
+        memory_store=memory_store,
+        user_id=settings.user_id,
+        tavily_api_key=settings.tavily_api_key,
+        enable_exec_tool=settings.enable_exec_tool,
+        enable_cron_service=settings.enable_cron_service,
+        mcp_servers=settings.mcp_servers,
+        extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
+    )
+
+    with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
+        if hasattr(checkpointer, "setup"):
+            checkpointer.setup()
+
+        optimizer_settings = ShortTermMemoryOptimizationSettings(
+            enabled=settings.short_term_memory_optimization.enabled,
+            run_on_startup=settings.short_term_memory_optimization.run_on_startup,
+            interval_minutes=settings.short_term_memory_optimization.interval_minutes,
+            keep_recent_checkpoints=settings.short_term_memory_optimization.keep_recent_checkpoints,
+            summary_batch_size=settings.short_term_memory_optimization.summary_batch_size,
+            max_threads_per_run=settings.short_term_memory_optimization.max_threads_per_run,
+            max_checkpoints_per_thread=settings.short_term_memory_optimization.max_checkpoints_per_thread,
+            archive_before_delete=settings.short_term_memory_optimization.archive_before_delete,
+            compress_level=settings.short_term_memory_optimization.compress_level,
+        )
+        _, optimizer_stop_event = start_short_memory_optimizer_worker(
+            postgres_dsn=settings.postgres_dsn,
+            settings=optimizer_settings,
+        )
+
+        graph = WBotGraph(
+            llm=llm_text,
+            tools=tools,
+            memory_store=memory_store,
+            retrieve_top_k=settings.retrieve_top_k,
+            user_id=settings.user_id,
+            checkpointer=checkpointer,
+            skills_loader=skills_loader,
+            multimodal_settings=settings.multimodal,
+            model_name=settings.model_routing.text_model_name,
+            llm_image=llm_image,
+            llm_audio=llm_audio,
+            image_model_name=settings.model_routing.image_model_name,
+            audio_model_name=settings.model_routing.audio_model_name,
+            token_optimization_settings=settings.token_optimization,
+        ).app
+
+        app = _build_app(
+            graph=graph,
+            thread_prefix=cfg.thread_prefix,
+            expose_step_logs=settings.expose_step_logs,
+        )
+        try:
+            uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
+        finally:
+            if optimizer_stop_event is not None:
+                optimizer_stop_event.set()
+
+
+def _build_app(*, graph: Any, thread_prefix: str, expose_step_logs: bool) -> FastAPI:
+    app = FastAPI(title="W-bot Web Gateway")
+    graph_lock = threading.Lock()
+    static_root = Path(__file__).resolve().parent / "static"
+    index_path = static_root / "index.html"
+
+    @app.get("/")
+    def read_index() -> FileResponse:
+        if not index_path.exists():
+            raise HTTPException(status_code=500, detail="Web UI file is missing: index.html")
+        return FileResponse(index_path)
+
+    @app.get("/api/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.post("/api/session/new", response_model=SessionResponse)
+    def new_session() -> SessionResponse:
+        return SessionResponse(session_id=_new_session_id(thread_prefix))
+
+    @app.get("/api/history", response_model=HistoryResponse)
+    def get_history(session_id: str) -> HistoryResponse:
+        if not session_id.strip():
+            raise HTTPException(status_code=400, detail="session_id is required")
+        config = {"configurable": {"thread_id": session_id.strip()}}
+
+        with graph_lock:
+            try:
+                snapshot = graph.get_state(config)
+            except Exception as exc:
+                logger.exception("Failed to load history for session_id=%s", session_id)
+                raise HTTPException(status_code=500, detail="Failed to load history") from exc
+
+        values = getattr(snapshot, "values", None) or {}
+        messages = values.get("messages", [])
+        normalized: list[dict[str, str]] = []
+        for message in messages:
+            kind = message_kind(message)
+            normalized.append(
+                {
+                    "role": kind,
+                    "content": _message_to_text(getattr(message, "content", "")),
+                }
+            )
+
+        return HistoryResponse(session_id=session_id.strip(), messages=normalized)
+
+    @app.post("/api/chat", response_model=ChatResponse)
+    def chat(payload: ChatRequest) -> ChatResponse:
+        message = payload.message.strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+
+        session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
+        config = {"configurable": {"thread_id": session_id}}
+        inputs = {"messages": [HumanMessage(content=message)]}
+        latest_ai_text = ""
+
+        with graph_lock:
+            try:
+                for event in graph.stream(inputs, config=config, stream_mode="values"):
+                    messages = event.get("messages", []) if isinstance(event, dict) else []
+                    if not messages:
+                        continue
+                    last = messages[-1]
+                    if isinstance(last, AIMessage) and not last.tool_calls:
+                        text = _message_to_text(last.content).strip()
+                        if text:
+                            latest_ai_text = text
+            except Exception as exc:
+                logger.exception("Failed to process web chat request")
+                raise HTTPException(status_code=500, detail="Chat processing failed") from exc
+
+        if not latest_ai_text:
+            latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
+        return ChatResponse(session_id=session_id, reply=latest_ai_text)
+
+    @app.post("/api/chat/stream")
+    def chat_stream(payload: ChatRequest) -> StreamingResponse:
+        message = payload.message.strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+
+        session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
+        token_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        done_event = threading.Event()
+        emitted_text = ""
+        seen_status: set[str] = set()
+
+        def emit_token(text: str) -> None:
+            nonlocal emitted_text
+            if text:
+                delta = text
+                if text.startswith(emitted_text):
+                    delta = text[len(emitted_text):]
+                emitted_text += delta
+                if delta:
+                    token_queue.put(("token", delta))
+
+        def emit_status(text: str) -> None:
+            normalized = text.strip()
+            if not normalized:
+                return
+            if normalized in seen_status:
+                return
+            seen_status.add(normalized)
+            logger.info("Web step status: session_id=%s status=%s", session_id, normalized)
+            token_queue.put(("status", normalized))
+
+        def worker() -> None:
+            if expose_step_logs:
+                emit_status("请求已接收，开始处理。")
+            config = {
+                "configurable": {
+                    "thread_id": session_id,
+                    "token_callback": emit_token,
+                    "status_callback": emit_status if expose_step_logs else None,
+                }
+            }
+            inputs = {"messages": [HumanMessage(content=message)]}
+            latest_ai_text = ""
+            try:
+                with graph_lock:
+                    for event in graph.stream(inputs, config=config, stream_mode="values"):
+                        messages = event.get("messages", []) if isinstance(event, dict) else []
+                        if not messages:
+                            continue
+                        last = messages[-1]
+                        if expose_step_logs:
+                            if isinstance(last, AIMessage) and last.tool_calls:
+                                emit_status(f"正在调用工具：{_summarize_tool_names(last.tool_calls)}")
+                            elif isinstance(last, ToolMessage):
+                                emit_status("工具调用已返回，正在整合结果。")
+                        if isinstance(last, AIMessage) and not last.tool_calls:
+                            text = _message_to_text(last.content).strip()
+                            if text:
+                                latest_ai_text = text
+                if expose_step_logs:
+                    emit_status("处理完成。")
+            except Exception:
+                logger.exception("Failed to process streaming web chat request")
+                token_queue.put(("error", "Chat processing failed"))
+            finally:
+                if not latest_ai_text:
+                    latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
+                token_queue.put(("done", latest_ai_text))
+                done_event.set()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        def event_stream() -> Any:
+            yield _sse_event("session", json.dumps({"session_id": session_id}, ensure_ascii=False))
+            while True:
+                try:
+                    event, data = token_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if done_event.is_set():
+                        break
+                    continue
+
+                if event == "token":
+                    payload_json = json.dumps({"text": data}, ensure_ascii=False)
+                    yield _sse_event("token", payload_json)
+                    continue
+                if event == "status":
+                    payload_json = json.dumps({"text": data}, ensure_ascii=False)
+                    yield _sse_event("status", payload_json)
+                    continue
+                if event == "error":
+                    payload_json = json.dumps({"message": data}, ensure_ascii=False)
+                    yield _sse_event("error", payload_json)
+                    continue
+                if event == "done":
+                    payload_json = json.dumps({"reply": data}, ensure_ascii=False)
+                    yield _sse_event("done", payload_json)
+                    break
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    return app
+
+
+def load_gateway_config(config_path: str) -> GatewayConfig:
+    target = Path(config_path)
+    if not target.is_absolute():
+        target = Path.cwd() / target
+
+    if not target.exists():
+        _write_default_config(target)
+        raise FileNotFoundError(
+            f"Config not found. A template has been generated at: {target}. "
+            "Please fill required fields and retry."
+        )
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    channels = payload.get("channels") if isinstance(payload.get("channels"), dict) else {}
+    web_raw = channels.get("web") if isinstance(channels.get("web"), dict) else {}
+    thread_prefix = str(_pick(payload, "threadPrefix", "thread_prefix", default="web")).strip() or "web"
+    return GatewayConfig(web=WebConfig.from_dict(web_raw), thread_prefix=thread_prefix)
+
+
+def _write_default_config(target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    template = default_app_config()
+    target.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _build_llm(settings: Any, *, model_name: str) -> Any:
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=model_name,
+        api_key=settings.dashscope_api_key,
+        base_url=settings.bailian_base_url,
+        temperature=0.2,
+    )
+
+
+def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    return default
+
+
+def _safe_port(value: Any) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return 8000
+    return min(65535, max(1, port))
+
+
+def _new_session_id(thread_prefix: str) -> str:
+    prefix = thread_prefix.strip() or "web"
+    return f"{prefix}:{int(time.time() * 1000)}"
+
+
+def _message_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+        return "\n".join(texts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text
+        return str(content)
+    return str(content)
+
+
+def _sse_event(event: str, data: str) -> str:
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _summarize_tool_names(tool_calls: list[dict[str, Any]]) -> str:
+    names: list[str] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        name = str(tool_call.get("name") or "").strip()
+        if name:
+            names.append(name)
+    if not names:
+        return f"{len(tool_calls)} 个工具"
+    return ", ".join(names)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run W-bot Web gateway")
+    parser.add_argument(
+        "--config",
+        default="configs/app.json",
+        help="Path to gateway config JSON (default: configs/app.json)",
+    )
+    args = parser.parse_args()
+    run_web_gateway(config_path=args.config)
+
+
+if __name__ == "__main__":
+    main()

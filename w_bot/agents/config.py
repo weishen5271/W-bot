@@ -35,6 +35,7 @@ class Settings:
     multimodal: "MultimodalSettings"
     token_optimization: "TokenOptimizationSettings"
     short_term_memory_optimization: "ShortTermMemoryOptimizationSettings"
+    expose_step_logs: bool
 
 
 @dataclass(frozen=True)
@@ -280,6 +281,12 @@ def load_settings(
             ),
             compress_level=_int_value(short_mem_opt_payload, "compressLevel", "compress_level", default=6),
         ),
+        expose_step_logs=_bool_value(
+            merged,
+            "exposeStepLogs",
+            "expose_step_logs",
+            default=True,
+        ),
     )
     logger.info(
         "Settings loaded from %s: model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
@@ -379,6 +386,7 @@ def default_app_config() -> dict[str, Any]:
                 "archiveBeforeDelete": True,
                 "compressLevel": 6,
             },
+            "exposeStepLogs": True,
         },
         "channels": {
             "feishu": {
@@ -391,7 +399,12 @@ def default_app_config() -> dict[str, Any]:
                 "groupPolicy": "mention",
                 "replyToMessage": True,
                 "reactEmoji": "THUMBSUP",
-            }
+            },
+            "web": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8000,
+            },
         },
         "threadPrefix": "feishu",
     }

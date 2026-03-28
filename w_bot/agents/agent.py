@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -112,7 +112,7 @@ class WBotGraph:
     def _retrieve_memories(
         self,
         state: AgentState,
-        _: RunnableConfig | None = None,
+        config: RunnableConfig | None = None,
     ) -> dict[str, str]:
         """检索并返回匹配结果。
         
@@ -123,8 +123,10 @@ class WBotGraph:
         query = _extract_last_user_message(state.get("messages", []))
         if not query:
             logger.debug("No user query found for memory retrieval")
+            _emit_status(config, "跳过长期记忆检索（当前回合无用户文本）。")
             return {"long_term_context": ""}
 
+        _emit_status(config, "正在检索长期记忆上下文...")
         logger.debug("Retrieving memories for current user query, query_len=%s", len(query))
         docs = self._memory_store.retrieve(
             user_id=self._user_id,
@@ -139,16 +141,18 @@ class WBotGraph:
             )
             if not docs:
                 logger.debug("No long-term memories found")
+                _emit_status(config, "未命中长期记忆，继续直接回答。")
                 return {"long_term_context": ""}
 
         lines = [f"- {doc.page_content}" for doc in docs]
         logger.debug("Retrieved %s long-term memory items", len(lines))
+        _emit_status(config, f"已加载 {len(lines)} 条长期记忆。")
         return {"long_term_context": "\n".join(lines)}
 
     def _agent(
         self,
         state: AgentState,
-        _: RunnableConfig | None = None,
+        config: RunnableConfig | None = None,
     ) -> dict[str, Any]:
         """处理agent相关逻辑并返回结果。
         
@@ -176,6 +180,7 @@ class WBotGraph:
             )
 
         optimized = self._prepare_optimized_context(state=state, history=sanitized_history)
+        _emit_status(config, "正在整理对话上下文...")
         full_system_prompt = self._context_builder.build_system_prompt(
             base_prompt=system_prompt,
             memory_context=memory_context,
@@ -191,8 +196,15 @@ class WBotGraph:
         logger.debug("Invoking LLM with %s messages", len(messages))
         llm, selected_route = self._llm_for_current_turn(optimized["recent_messages"], messages=messages)
         logger.info("Model routing selected route=%s", selected_route)
+        _emit_status(config, f"已选择模型路由：{selected_route}。")
+        _emit_status(config, "正在生成回复...")
+        token_callback = _resolve_stream_token_callback(config)
         try:
-            response = llm.invoke(messages)
+            response = _invoke_llm_with_optional_stream(
+                llm=llm,
+                messages=messages,
+                token_callback=token_callback,
+            )
         except Exception as exc:
             if not _is_messages_length_error(exc):
                 raise
@@ -200,12 +212,21 @@ class WBotGraph:
                 "Provider rejected message payload; retry with strict text-only fallback: %s",
                 exc,
             )
+            _emit_status(config, "触发兼容回退：改用纯文本上下文重试。")
             fallback_messages = _build_text_only_retry_messages(
                 system_prompt=full_system_prompt,
                 history=messages,
             )
-            response = self._llm_text.invoke(fallback_messages)
+            response = _invoke_llm_with_optional_stream(
+                llm=self._llm_text,
+                messages=fallback_messages,
+                token_callback=token_callback,
+            )
         logger.debug("LLM response received, has_tool_calls=%s", bool(response.tool_calls))
+        if response.tool_calls:
+            _emit_status(config, f"准备执行工具调用：{_summarize_tool_calls(response.tool_calls)}")
+        else:
+            _emit_status(config, "回复已生成。")
         return {
             "messages": [response],
             "conversation_summary": optimized["conversation_summary"],
@@ -584,6 +605,96 @@ def _is_messages_length_error(exc: Exception) -> bool:
     """
     text = str(exc).lower()
     return "messages parameter length invalid" in text
+
+
+def _resolve_stream_token_callback(config: RunnableConfig | None) -> Callable[[str], None] | None:
+    if config is None:
+        return None
+    if not hasattr(config, "get"):
+        return None
+    configurable = config.get("configurable")  # type: ignore[call-arg]
+    if not isinstance(configurable, dict):
+        return None
+    callback = configurable.get("token_callback")
+    if callable(callback):
+        return callback
+    return None
+
+
+def _resolve_status_callback(config: RunnableConfig | None) -> Callable[[str], None] | None:
+    if config is None:
+        return None
+    if not hasattr(config, "get"):
+        return None
+    configurable = config.get("configurable")  # type: ignore[call-arg]
+    if not isinstance(configurable, dict):
+        return None
+    callback = configurable.get("status_callback")
+    if callable(callback):
+        return callback
+    return None
+
+
+def _emit_status(config: RunnableConfig | None, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        return
+    logger.info("Step status: thread_id=%s status=%s", _resolve_thread_id(config), normalized)
+    callback = _resolve_status_callback(config)
+    if callback is None:
+        return
+    try:
+        callback(normalized)
+    except Exception:
+        logger.debug("Status callback failed", exc_info=True)
+
+
+def _resolve_thread_id(config: RunnableConfig | None) -> str:
+    if config is None:
+        return "-"
+    if not hasattr(config, "get"):
+        return "-"
+    configurable = config.get("configurable")  # type: ignore[call-arg]
+    if not isinstance(configurable, dict):
+        return "-"
+    thread_id = configurable.get("thread_id")
+    if isinstance(thread_id, str) and thread_id.strip():
+        return thread_id.strip()
+    return "-"
+
+
+def _invoke_llm_with_optional_stream(
+    *,
+    llm: Any,
+    messages: list[AnyMessage],
+    token_callback: Callable[[str], None] | None,
+) -> AIMessage:
+    if token_callback is None:
+        return llm.invoke(messages)
+
+    merged: AIMessage | None = None
+    for chunk in llm.stream(messages):
+        text = _to_text_content(getattr(chunk, "content", ""))
+        if text:
+            token_callback(text)
+        merged = chunk if merged is None else (merged + chunk)
+
+    if merged is None:
+        return AIMessage(content="")
+    return merged
+
+
+def _summarize_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
+    names: list[str] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        name = str(tool_call.get("name") or "").strip()
+        if name:
+            names.append(name)
+    if not names:
+        return f"{len(tool_calls)} 个工具"
+    return ", ".join(names)
 
 
 def _build_text_only_retry_messages(

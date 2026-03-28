@@ -81,6 +81,7 @@ class FeishuGateway:
         config: FeishuConfig,
         thread_prefix: str,
         media_root_dir: str = "media",
+        expose_step_logs: bool = True,
     ) -> None:
         """初始化对象并保存运行所需依赖。
         
@@ -101,6 +102,7 @@ class FeishuGateway:
         self._client: Any | None = None
         self._lark: Any | None = None
         self._media_root = Path(media_root_dir).expanduser()
+        self._expose_step_logs = expose_step_logs
         if not self._media_root.is_absolute():
             self._media_root = Path.cwd() / self._media_root
         self._media_root.mkdir(parents=True, exist_ok=True)
@@ -254,7 +256,20 @@ class FeishuGateway:
             inbound: 归一化后的入站消息对象。
             session_id: 业务对象唯一标识。
         """
-        config = {"configurable": {"thread_id": session_id}}
+        status_lines: list[str] = []
+
+        def emit_status(text: str) -> None:
+            normalized = text.strip()
+            if normalized and normalized not in status_lines:
+                status_lines.append(normalized)
+                logger.info("Feishu step status: session_id=%s status=%s", session_id, normalized)
+
+        config = {
+            "configurable": {
+                "thread_id": session_id,
+                "status_callback": emit_status if self._expose_step_logs else None,
+            }
+        }
         media_payload = [item.to_dict() for item in inbound.media]
         prompt_text = _build_inbound_prompt_text(inbound)
         inputs = {
@@ -277,6 +292,12 @@ class FeishuGateway:
                     content = _message_to_text(last.content).strip()
                     if content:
                         latest_ai_text = content
+
+        if self._expose_step_logs and status_lines:
+            status_block = "\n".join(f"- {line}" for line in status_lines)
+            if latest_ai_text.strip():
+                return f"步骤状态：\n{status_block}\n\n最终回复：\n{latest_ai_text}"
+            return f"步骤状态：\n{status_block}"
 
         return latest_ai_text
 
@@ -846,6 +867,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             config=cfg.feishu,
             thread_prefix=cfg.thread_prefix,
             media_root_dir=settings.multimodal.media_root_dir,
+            expose_step_logs=settings.expose_step_logs,
         )
         try:
             gateway.start()

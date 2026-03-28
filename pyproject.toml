@@ -21,6 +21,8 @@ dependencies = [
     "e2b>=1.0.5",
     "rich>=13.7.1",
     "lark-oapi>=1.4.20,<2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -30,3 +32,4 @@ where = ["."]
 w-bot = "w_bot.__main__:main"
 agents-cli = "w_bot.agents.cli:run_cli"
 agents-feishu = "w_bot.channels.feishu.gateway:main"
+agents-web = "w_bot.channels.web.gateway:main"

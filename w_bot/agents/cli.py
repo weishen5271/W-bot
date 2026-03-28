@@ -220,9 +220,16 @@ def _repl(graph: Any, settings: Settings) -> None:
             return
 
         logger.info("Received user input, len=%s", len(user_text))
+        def emit_status(text: str) -> None:
+            normalized = text.strip()
+            if normalized:
+                logger.info("CLI step status: session_id=%s status=%s", current_session_id, normalized)
+                console.print(f"[dim][Status][/dim] {normalized}")
+
         config = {
             "configurable": {
                 "thread_id": current_session_id,
+                "status_callback": emit_status if settings.expose_step_logs else None,
             }
         }
         inputs = {"messages": [HumanMessage(content=user_text)]}

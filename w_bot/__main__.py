@@ -26,12 +26,23 @@ def main() -> None:
         default="configs/app.json",
         help="Path to config JSON for Feishu gateway",
     )
+    web_parser = subparsers.add_parser("web", help="Run Web gateway mode")
+    web_parser.add_argument(
+        "--config",
+        default="configs/app.json",
+        help="Path to config JSON for Web gateway",
+    )
 
     args = parser.parse_args()
     mode = args.mode or "cli"
     if mode == "feishu":
         logger.info("Starting W-bot Feishu gateway from main entrypoint")
         run_feishu_gateway(config_path=args.config)
+    elif mode == "web":
+        logger.info("Starting W-bot Web gateway from main entrypoint")
+        from w_bot.channels.web.gateway import run_web_gateway
+
+        run_web_gateway(config_path=args.config)
     else:
         logger.info("Starting W-bot CLI from main entrypoint")
         run_cli(config_path=getattr(args, "config", "configs/app.json"))
