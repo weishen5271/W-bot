@@ -36,6 +36,9 @@ class Settings:
     token_optimization: "TokenOptimizationSettings"
     short_term_memory_optimization: "ShortTermMemoryOptimizationSettings"
     expose_step_logs: bool
+    enable_openclaw_profile: bool
+    openclaw_profile_root_dir: str
+    openclaw_auto_init: bool
 
 
 @dataclass(frozen=True)
@@ -287,6 +290,24 @@ def load_settings(
             "expose_step_logs",
             default=True,
         ),
+        enable_openclaw_profile=_bool_value(
+            merged,
+            "enableOpenClawProfile",
+            "enable_openclaw_profile",
+            default=True,
+        ),
+        openclaw_profile_root_dir=_string_value(
+            merged,
+            "openClawProfileRootDir",
+            "openclaw_profile_root_dir",
+            default=".",
+        ),
+        openclaw_auto_init=_bool_value(
+            merged,
+            "openClawAutoInit",
+            "openclaw_auto_init",
+            default=True,
+        ),
     )
     logger.info(
         "Settings loaded from %s: model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
@@ -387,6 +408,9 @@ def default_app_config() -> dict[str, Any]:
                 "compressLevel": 6,
             },
             "exposeStepLogs": True,
+            "enableOpenClawProfile": True,
+            "openClawProfileRootDir": ".",
+            "openClawAutoInit": True,
         },
         "channels": {
             "feishu": {

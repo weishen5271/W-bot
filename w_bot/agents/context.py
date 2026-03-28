@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+from .openclaw_profile import OpenClawProfileLoader
 from .skills import SkillsLoader
 
 
 class ContextBuilder:
-    def __init__(self, *, skills_loader: SkillsLoader | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        skills_loader: SkillsLoader | None = None,
+        openclaw_profile_loader: OpenClawProfileLoader | None = None,
+    ) -> None:
         """初始化对象并保存运行所需依赖。
         
         Args:
             skills_loader: 技能加载器实例，用于读取 always 技能和技能摘要。
+            openclaw_profile_loader: OpenClaw 档案加载器，用于注入人格与操作约束上下文。
         """
         self._skills_loader = skills_loader
+        self._openclaw_profile_loader = openclaw_profile_loader
 
     def build_system_prompt(
         self,
@@ -26,7 +34,13 @@ class ContextBuilder:
             memory_context: 已检索的长期记忆文本。
             conversation_summary: 历史对话压缩后的摘要文本。
         """
-        blocks: list[str] = [base_prompt.strip(), f"已检索到的长期记忆:\n{memory_context or '无'}"]
+        blocks: list[str] = [base_prompt.strip()]
+        if self._openclaw_profile_loader is not None:
+            profile_context = self._openclaw_profile_loader.render_profile_context().strip()
+            if profile_context:
+                blocks.append(f"OpenClaw 档案上下文:\n{profile_context}")
+
+        blocks.append(f"已检索到的长期记忆:\n{memory_context or '无'}")
         if conversation_summary.strip():
             blocks.append(f"会话摘要（历史压缩）:\n{conversation_summary.strip()}")
 

@@ -20,6 +20,7 @@ from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
+from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.short_memory_optimizer import (
     ShortTermMemoryOptimizationSettings,
     start_short_memory_optimizer_worker,
@@ -806,7 +807,14 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         if settings.model_routing.audio_model_name
         else None
     )
-    memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
+    openclaw_profile_loader = OpenClawProfileLoader(
+        root_dir=settings.openclaw_profile_root_dir,
+        enabled=settings.enable_openclaw_profile,
+        auto_init=settings.openclaw_auto_init,
+    )
+    openclaw_profile_loader.prepare_startup()
+    memory_file_path = openclaw_profile_loader.resolve_memory_file_path(settings.memory_file_path)
+    memory_store = LongTermMemoryStore(memory_file_path=memory_file_path)
     skills_loader = (
         SkillsLoader(
             workspace_skills_dir=settings.skills_workspace_dir,
@@ -853,6 +861,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             user_id=settings.user_id,
             checkpointer=checkpointer,
             skills_loader=skills_loader,
+            openclaw_profile_loader=openclaw_profile_loader,
             multimodal_settings=settings.multimodal,
             model_name=settings.model_routing.text_model_name,
             llm_image=llm_image,

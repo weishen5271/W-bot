@@ -273,7 +273,64 @@
     sendBtn.disabled = true;
     addMessage("user", text);
     inputEl.value = "";
+    const statusMsgEl = addMessage("system", "Wbot is thinking....");
     const botMsgEl = addMessage("bot", "");
+
+    const pendingTokenQueue = [];
+    let drainingTokens = false;
+    let thinkingTimer = null;
+    const thinkingFrames = [
+      "Wbot is thinking.",
+      "Wbot is thinking..",
+      "Wbot is thinking...",
+      "Wbot is thinking...."
+    ];
+    let thinkingIndex = 0;
+    let pendingStatusText = "";
+
+    function startThinking() {
+      statusMsgEl.textContent = thinkingFrames[thinkingIndex];
+      thinkingTimer = setInterval(() => {
+        thinkingIndex = (thinkingIndex + 1) % thinkingFrames.length;
+        statusMsgEl.textContent = thinkingFrames[thinkingIndex];
+      }, 280);
+    }
+
+    function stopThinking() {
+      if (thinkingTimer) {
+        clearInterval(thinkingTimer);
+        thinkingTimer = null;
+      }
+    }
+
+    startThinking();
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function drainTokens() {
+      if (drainingTokens) return;
+      drainingTokens = true;
+      try {
+        while (pendingTokenQueue.length > 0) {
+          const payload = pendingTokenQueue.shift() || "";
+          for (let i = 0; i < payload.length; i += 3) {
+            botMsgEl.textContent += payload.slice(i, i + 3);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            await sleep(8);
+          }
+        }
+      } finally {
+        drainingTokens = false;
+      }
+    }
+
+    function enqueueToken(textChunk) {
+      if (!textChunk) return;
+      pendingTokenQueue.push(textChunk);
+      drainTokens();
+    }
 
     try {
       const res = await fetch("/api/chat/stream", {
@@ -294,6 +351,7 @@
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
       let finalReply = "";
+      let hasToken = false;
 
       while (true) {
         const {value, done} = await reader.read();
@@ -327,26 +385,49 @@
             sessionId = parsed.session_id;
             localStorage.setItem(STORAGE_KEY, sessionId);
             updateSessionView();
+          } else if (event === "thinking" && parsed.text) {
+            if (!hasToken) {
+              statusMsgEl.textContent = parsed.text;
+            }
           } else if (event === "token" && parsed.text) {
-            botMsgEl.textContent += parsed.text;
-            messagesEl.scrollTop = messagesEl.scrollHeight;
+            if (!hasToken) {
+              hasToken = true;
+              stopThinking();
+              statusMsgEl.textContent = pendingStatusText || "步骤状态: 正在生成回复...";
+            }
+            enqueueToken(parsed.text);
           } else if (event === "status" && parsed.text) {
-            addMessage("system", `步骤状态: ${parsed.text}`);
+            pendingStatusText = `步骤状态: ${parsed.text}`;
+            if (hasToken) {
+              statusMsgEl.textContent = pendingStatusText;
+            }
           } else if (event === "done") {
             finalReply = parsed.reply || finalReply;
+            stopThinking();
+            statusMsgEl.textContent = "步骤状态: 处理完成。";
           } else if (event === "error") {
             throw new Error(parsed.message || "流式请求失败");
           }
         }
       }
 
+      while (drainingTokens || pendingTokenQueue.length > 0) {
+        await sleep(10);
+      }
+
       if (!botMsgEl.textContent && finalReply) {
-        botMsgEl.textContent = finalReply;
+        enqueueToken(finalReply);
+        while (drainingTokens || pendingTokenQueue.length > 0) {
+          await sleep(10);
+        }
       }
     } catch (err) {
+      stopThinking();
       botMsgEl.className = "msg system";
       botMsgEl.textContent = `错误: ${err.message || String(err)}`;
+      statusMsgEl.textContent = "步骤状态: 失败。";
     } finally {
+      stopThinking();
       sending = false;
       sendBtn.disabled = false;
       inputEl.focus();

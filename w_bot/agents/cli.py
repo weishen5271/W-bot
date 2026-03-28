@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any
 
@@ -14,6 +15,7 @@ from .agent import WBotGraph, message_kind
 from .config import Settings, load_settings
 from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
+from .openclaw_profile import OpenClawProfileLoader
 from .short_memory_optimizer import (
     ShortTermMemoryOptimizationSettings,
     start_short_memory_optimizer_worker,
@@ -96,7 +98,14 @@ def run_cli(config_path: str = "configs/app.json") -> None:
         if settings.model_routing.audio_model_name
         else None
     )
-    memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
+    openclaw_profile_loader = OpenClawProfileLoader(
+        root_dir=settings.openclaw_profile_root_dir,
+        enabled=settings.enable_openclaw_profile,
+        auto_init=settings.openclaw_auto_init,
+    )
+    openclaw_profile_loader.prepare_startup()
+    memory_file_path = openclaw_profile_loader.resolve_memory_file_path(settings.memory_file_path)
+    memory_store = LongTermMemoryStore(memory_file_path=memory_file_path)
     skills_loader = (
         SkillsLoader(
             workspace_skills_dir=settings.skills_workspace_dir,
@@ -145,6 +154,7 @@ def run_cli(config_path: str = "configs/app.json") -> None:
             user_id=settings.user_id,
             checkpointer=checkpointer,
             skills_loader=skills_loader,
+            openclaw_profile_loader=openclaw_profile_loader,
             multimodal_settings=settings.multimodal,
             model_name=settings.model_routing.text_model_name,
             llm_image=llm_image,
@@ -174,6 +184,7 @@ def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
         api_key=settings.dashscope_api_key,
         base_url=settings.bailian_base_url,
         temperature=0.2,
+        streaming=True,
     )
 
 
@@ -220,15 +231,33 @@ def _repl(graph: Any, settings: Settings) -> None:
             return
 
         logger.info("Received user input, len=%s", len(user_text))
+        stream_state = {
+            "started": False,
+            "token_count": 0,
+        }
+
+        print("Wbot is thinking....", flush=True)
+
         def emit_status(text: str) -> None:
             normalized = text.strip()
             if normalized:
                 logger.info("CLI step status: session_id=%s status=%s", current_session_id, normalized)
                 console.print(f"[dim][Status][/dim] {normalized}")
 
+        def emit_token(text: str) -> None:
+            token = text or ""
+            if not token:
+                return
+            if not stream_state["started"]:
+                stream_state["started"] = True
+                print("W-bot > ", end="", flush=True)
+            stream_state["token_count"] += len(token)
+            print(token, end="", flush=True)
+
         config = {
             "configurable": {
                 "thread_id": current_session_id,
+                "token_callback": emit_token,
                 "status_callback": emit_status if settings.expose_step_logs else None,
             }
         }
@@ -239,12 +268,26 @@ def _repl(graph: Any, settings: Settings) -> None:
             if not messages:
                 continue
             last = messages[-1]
+            kind = message_kind(last)
             msg_id = getattr(last, "id", None) or f"{len(messages)}-{message_kind(last)}"
             if msg_id in seen_message_ids:
                 continue
             seen_message_ids.add(msg_id)
-            logger.debug("Rendering message: kind=%s, id=%s", message_kind(last), msg_id)
+            if kind == "thought" and stream_state["token_count"] > 0:
+                continue
+            if kind == "thought" and stream_state["token_count"] == 0:
+                text = _message_to_text(last)
+                if text.strip():
+                    stream_state["started"] = True
+                    stream_state["token_count"] += len(text)
+                    console.print("[bold cyan]W-bot > [/bold cyan]", end="")
+                    _stream_text_to_console(text)
+                    continue
+            logger.debug("Rendering message: kind=%s, id=%s", kind, msg_id)
             _render_message(last)
+
+        if stream_state["started"]:
+            console.print()
 
 
 def _render_existing_session_history(
@@ -301,12 +344,44 @@ def _render_message(message: Any) -> None:
         "human": "white",
     }.get(kind, "white")
 
-    content = message.content if isinstance(message.content, str) else str(message.content)
+    content = _message_to_text(message)
 
     if kind == "action":
         content = f"{content}\n\nTool Calls: {message.tool_calls}"
 
     console.print(Panel(content, title=title, border_style=style, expand=True))
+
+
+def _message_to_text(message: Any) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        lines: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = str(block.get("text") or "").strip()
+                if text:
+                    lines.append(text)
+        if lines:
+            return "\n".join(lines)
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text
+    return str(content)
+
+
+def _stream_text_to_console(text: str, *, chunk_size: int = 4, delay_seconds: float = 0.03) -> None:
+    payload = text or ""
+    if not payload:
+        print("", flush=True)
+        return
+    for idx in range(0, len(payload), chunk_size):
+        print(payload[idx: idx + chunk_size], end="", flush=True)
+        time.sleep(delay_seconds)
 
 
 if __name__ == "__main__":

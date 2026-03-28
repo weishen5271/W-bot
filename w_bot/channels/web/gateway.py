@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import queue
 import threading
@@ -21,6 +22,7 @@ from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
+from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.short_memory_optimizer import (
     ShortTermMemoryOptimizationSettings,
     start_short_memory_optimizer_worker,
@@ -99,7 +101,14 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
         if settings.model_routing.audio_model_name
         else None
     )
-    memory_store = LongTermMemoryStore(memory_file_path=settings.memory_file_path)
+    openclaw_profile_loader = OpenClawProfileLoader(
+        root_dir=settings.openclaw_profile_root_dir,
+        enabled=settings.enable_openclaw_profile,
+        auto_init=settings.openclaw_auto_init,
+    )
+    openclaw_profile_loader.prepare_startup()
+    memory_file_path = openclaw_profile_loader.resolve_memory_file_path(settings.memory_file_path)
+    memory_store = LongTermMemoryStore(memory_file_path=memory_file_path)
     skills_loader = (
         SkillsLoader(
             workspace_skills_dir=settings.skills_workspace_dir,
@@ -146,6 +155,7 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
             user_id=settings.user_id,
             checkpointer=checkpointer,
             skills_loader=skills_loader,
+            openclaw_profile_loader=openclaw_profile_loader,
             multimodal_settings=settings.multimodal,
             model_name=settings.model_routing.text_model_name,
             llm_image=llm_image,
@@ -177,7 +187,14 @@ def _build_app(*, graph: Any, thread_prefix: str, expose_step_logs: bool) -> Fas
     def read_index() -> FileResponse:
         if not index_path.exists():
             raise HTTPException(status_code=500, detail="Web UI file is missing: index.html")
-        return FileResponse(index_path)
+        return FileResponse(
+            index_path,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -255,6 +272,7 @@ def _build_app(*, graph: Any, thread_prefix: str, expose_step_logs: bool) -> Fas
         done_event = threading.Event()
         emitted_text = ""
         seen_status: set[str] = set()
+        token_queue.put(("thinking", "Wbot is thinking...."))
 
         def emit_token(text: str) -> None:
             nonlocal emitted_text
@@ -318,19 +336,33 @@ def _build_app(*, graph: Any, thread_prefix: str, expose_step_logs: bool) -> Fas
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
 
-        def event_stream() -> Any:
+        async def event_stream() -> Any:
+            emitted_any_token = False
+            # Some clients/proxies buffer tiny chunks; send an initial SSE comment to force flush.
+            yield ": stream-open\n\n"
             yield _sse_event("session", json.dumps({"session_id": session_id}, ensure_ascii=False))
+            heartbeat_at = time.monotonic()
             while True:
                 try:
-                    event, data = token_queue.get(timeout=0.2)
+                    event, data = token_queue.get_nowait()
                 except queue.Empty:
                     if done_event.is_set():
                         break
+                    now = time.monotonic()
+                    if now - heartbeat_at >= 1.0:
+                        heartbeat_at = now
+                        yield ": ping\n\n"
+                    await asyncio.sleep(0.05)
                     continue
 
                 if event == "token":
+                    emitted_any_token = True
                     payload_json = json.dumps({"text": data}, ensure_ascii=False)
                     yield _sse_event("token", payload_json)
+                    continue
+                if event == "thinking":
+                    payload_json = json.dumps({"text": data}, ensure_ascii=False)
+                    yield _sse_event("thinking", payload_json)
                     continue
                 if event == "status":
                     payload_json = json.dumps({"text": data}, ensure_ascii=False)
@@ -341,11 +373,22 @@ def _build_app(*, graph: Any, thread_prefix: str, expose_step_logs: bool) -> Fas
                     yield _sse_event("error", payload_json)
                     continue
                 if event == "done":
+                    if not emitted_any_token and data.strip():
+                        # Fallback: if upstream callback tokens were not observed, still stream in chunks.
+                        for chunk in _chunk_text(data, size=18):
+                            payload_json = json.dumps({"text": chunk}, ensure_ascii=False)
+                            yield _sse_event("token", payload_json)
+                            await asyncio.sleep(0.01)
                     payload_json = json.dumps({"reply": data}, ensure_ascii=False)
                     yield _sse_event("done", payload_json)
                     break
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        headers = {
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
     return app
 
@@ -383,6 +426,7 @@ def _build_llm(settings: Any, *, model_name: str) -> Any:
         api_key=settings.dashscope_api_key,
         base_url=settings.bailian_base_url,
         temperature=0.2,
+        streaming=True,
     )
 
 
@@ -442,6 +486,13 @@ def _summarize_tool_names(tool_calls: list[dict[str, Any]]) -> str:
     if not names:
         return f"{len(tool_calls)} 个工具"
     return ", ".join(names)
+
+
+def _chunk_text(text: str, *, size: int) -> list[str]:
+    payload = text or ""
+    if not payload:
+        return []
+    return [payload[i: i + size] for i in range(0, len(payload), size)]
 
 
 def main() -> None:

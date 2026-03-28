@@ -10,10 +10,11 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from .config import MultimodalSettings, TokenOptimizationSettings
-from .logging_config import get_logger
 from .context import ContextBuilder
+from .logging_config import get_logger
 from .memory import LongTermMemoryStore
 from .multimodal import MultimodalNormalizer, MultimodalRuntimeConfig, parse_human_payload
+from .openclaw_profile import OpenClawProfileLoader
 from .providers import resolve_provider_capabilities
 from .skills import SkillsLoader
 
@@ -38,6 +39,7 @@ class WBotGraph:
         user_id: str,
         checkpointer: Any,
         skills_loader: SkillsLoader | None = None,
+        openclaw_profile_loader: OpenClawProfileLoader | None = None,
         multimodal_settings: MultimodalSettings | None = None,
         model_name: str = "",
         llm_image: ChatOpenAI | None = None,
@@ -56,6 +58,7 @@ class WBotGraph:
             user_id: 业务对象唯一标识。
             checkpointer: LangGraph 检查点对象，用于持久化状态。
             skills_loader: 技能加载器实例，用于读取 always 技能和技能摘要。
+            openclaw_profile_loader: OpenClaw 档案加载器，用于注入人格与运行约束上下文。
             multimodal_settings: 多模态处理配置。
             model_name: 当前使用的模型名称。
             llm_image: 图像理解模型客户端实例。
@@ -76,7 +79,10 @@ class WBotGraph:
         self._memory_store = memory_store
         self._retrieve_top_k = retrieve_top_k
         self._user_id = user_id
-        self._context_builder = ContextBuilder(skills_loader=skills_loader)
+        self._context_builder = ContextBuilder(
+            skills_loader=skills_loader,
+            openclaw_profile_loader=openclaw_profile_loader,
+        )
         self._multimodal_cfg = multimodal_settings
         self._text_model_name = model_name
         self._image_model_name = image_model_name

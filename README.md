@@ -128,12 +128,33 @@ Skill 依赖从 frontmatter 元数据读取：
 - 配置中 `agent.enableExecTool=true`
 - 运行环境有 `npx`
 
+### OpenClaw 档案结构（可选）
+
+支持按 OpenClaw 风格管理 Agent 档案。默认开启后会在工作区自动补齐以下文件/目录（若缺失）：
+
+- `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`TOOLS.md`
+- `MEMORY.md`、`BOOTSTRAP.md`、`BOOT.md`、`HEARTBEAT.md`
+- `memory/`、`skills/`
+
+启动行为：
+
+- `IDENTITY/SOUL/AGENTS/USER/TOOLS/BOOT/HEARTBEAT` 会注入系统提示词上下文。
+- `BOOTSTRAP.md` 在启动时读取一次后自动删除（用完即删）。
+- 当 `memoryFilePath` 仍为默认值时，会优先使用 `MEMORY.md` 作为长期记忆文件。
+
+相关配置项（`agent` 下）：
+
+- `enableOpenClawProfile`：是否启用 OpenClaw 档案加载，默认 `true`
+- `openClawProfileRootDir`：档案根目录，默认 `.`
+- `openClawAutoInit`：是否自动补齐缺失档案文件，默认 `true`
+
 ### 关键文件
 
 - `w_bot/agents/cli.py`：CLI 运行时与 Postgres checkpoint 连接。
 - `w_bot/agents/agent.py`：LangGraph 节点与路由。
 - `w_bot/agents/context.py`：系统提示词组装（memory + skills）。
 - `w_bot/agents/memory.py`：本地 `MEMORY.MD` 长期记忆存储。
+- `w_bot/agents/openclaw_profile.py`：OpenClaw 档案加载与启动期处理。
 - `w_bot/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
 - `w_bot/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
 - `w_bot/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。

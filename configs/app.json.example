@@ -52,7 +52,10 @@
       "archiveBeforeDelete": true,
       "compressLevel": 6
     },
-    "exposeStepLogs": true
+    "exposeStepLogs": true,
+    "enableOpenClawProfile": true,
+    "openClawProfileRootDir": ".",
+    "openClawAutoInit": true
   },
   "channels": {
     "feishu": {
