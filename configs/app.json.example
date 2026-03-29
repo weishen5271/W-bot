@@ -4,7 +4,7 @@
     "postgresDsn": "postgresql://<user>:<password>@<host>:5432/<database>",
     "milvusUri": "http://<host>:19530",
     "memoryCollection": "w_bot_long_term_memory_cli",
-    "memoryFilePath": "MEMORY.MD",
+    "memoryFilePath": "memory/MEMORY.md",
     "userId": "cli_user",
     "sessionId": "",
     "sessionStateFilePath": ".w_bot_session.json",
@@ -51,7 +51,7 @@
     },
     "exposeStepLogs": true,
     "enableOpenClawProfile": true,
-    "openClawProfileRootDir": ".",
+    "openClawProfileRootDir": "~/.wbot",
     "openClawAutoInit": true,
     "enableConsoleLogs": true,
     "loopGuard": {

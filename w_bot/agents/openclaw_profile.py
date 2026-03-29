@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import resources
+import shutil
 from pathlib import Path
 
 from .logging_config import get_logger
@@ -21,7 +23,8 @@ PROFILE_FILES: tuple[OpenClawFileSpec, ...] = (
     OpenClawFileSpec("IDENTITY.md", "身份", "# IDENTITY\n\n在这里定义名称、定位和能力边界。\n"),
     OpenClawFileSpec("USER.md", "用户", "# USER\n\n在这里记录你服务对象的背景和偏好。\n"),
     OpenClawFileSpec("TOOLS.md", "工具", "# TOOLS\n\n在这里记录工具使用规范和限制。\n"),
-    OpenClawFileSpec("MEMORY.md", "长期记忆", "# MEMORY\n\n在这里沉淀长期稳定事实。\n"),
+    OpenClawFileSpec("memory/MEMORY.md", "长期记忆", "# MEMORY\n\n在这里沉淀长期稳定事实。\n"),
+    OpenClawFileSpec("memory/HISTORY.md", "历史日志", "# HISTORY\n\n在这里沉淀会话历史。\n"),
     OpenClawFileSpec("BOOTSTRAP.md", "出生仪式", ""),
     OpenClawFileSpec("BOOT.md", "重启清单", "# BOOT\n\n每次启动都应执行的初始化步骤。\n"),
     OpenClawFileSpec("HEARTBEAT.md", "心跳待办", "# HEARTBEAT\n\n定期检查项与维护节奏。\n"),
@@ -73,15 +76,21 @@ class OpenClawProfileLoader:
         if configured.is_absolute():
             return str(configured)
 
-        if configured_path.strip() and configured_path.strip().upper() != "MEMORY.MD":
+        configured_clean = configured_path.strip()
+        if configured_clean and configured_clean.upper() not in {"MEMORY.MD", "MEMORY/MEMORY.MD"}:
             return str((Path.cwd() / configured).resolve())
 
-        preferred = self._root / "MEMORY.md"
-        legacy = self._root / "MEMORY.MD"
+        preferred = self._root / "memory" / "MEMORY.md"
+        legacy_candidates = (
+            self._root / "memory" / "MEMORY.MD",
+            self._root / "MEMORY.md",
+            self._root / "MEMORY.MD",
+        )
         if preferred.exists():
             return str(preferred)
-        if legacy.exists():
-            return str(legacy)
+        for legacy in legacy_candidates:
+            if legacy.exists():
+                return str(legacy)
         return str(preferred)
 
     def render_profile_context(self) -> str:
@@ -106,23 +115,65 @@ class OpenClawProfileLoader:
             return ""
         return "\n\n".join(blocks)
 
+    def onboard(self) -> list[str]:
+        """初始化工作区档案模板，只补齐缺失文件。"""
+        return self._ensure_scaffold()
+
     def _ensure_scaffold(self) -> list[str]:
         created: list[str] = []
         self._root.mkdir(parents=True, exist_ok=True)
-        memory_dir = self._root / "memory"
+        created.extend(self._copy_template_tree())
+
         skills_dir = self._root / "skills"
-        for folder in (memory_dir, skills_dir):
-            if not folder.exists():
-                folder.mkdir(parents=True, exist_ok=True)
-                created.append(str(folder))
+        if not skills_dir.exists():
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            created.append(str(skills_dir))
 
         for spec in PROFILE_FILES:
             target = self._root / spec.path
             if target.exists():
                 continue
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(spec.placeholder, encoding="utf-8")
             created.append(str(target))
         return created
+
+    def _copy_template_tree(self) -> list[str]:
+        created: list[str] = []
+        template_root = self._resolve_template_root()
+        if template_root is None or not template_root.exists():
+            return created
+
+        for source in sorted(template_root.rglob("*")):
+            if source.name == "__pycache__":
+                continue
+            relative = source.relative_to(template_root)
+            target = self._root / relative
+            if source.is_dir():
+                if not target.exists():
+                    target.mkdir(parents=True, exist_ok=True)
+                    created.append(str(target))
+                continue
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            created.append(str(target))
+        return created
+
+    def _resolve_template_root(self) -> Path | None:
+        try:
+            package_root = Path(str(resources.files("w_bot"))) / "template"
+        except (ModuleNotFoundError, FileNotFoundError):
+            package_root = None
+
+        if package_root is not None and package_root.exists():
+            return package_root
+
+        local_root = Path(__file__).resolve().parent.parent / "template"
+        if local_root.exists():
+            return local_root
+        return None
 
     def _consume_bootstrap_once(self) -> str:
         bootstrap_path = self._root / "BOOTSTRAP.md"

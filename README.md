@@ -45,22 +45,30 @@ cp configs/app.json.example configs/app.json
 # 然后在 configs/app.json 中填入真实 keys/secrets
 ```
 
-4. 运行：
+4. 初始化用户档案：
 
 ```bash
-python main.py cli --config configs/app.json
+wbot onboard
+```
+
+该命令会在用户目录创建 `~/.wbot/`，并从 `w_bot/template/` 复制缺失模板进去，只补齐缺失文件，不覆盖已有文件。
+
+5. 运行 Agent CLI：
+
+```bash
+wbot agent --config configs/app.json
 ```
 
 飞书网关模式：
 
 ```bash
-python main.py feishu --config configs/app.json
+wbot feishu --config configs/app.json
 ```
 
 Web 页面模式：
 
 ```bash
-python main.py web --config configs/app.json
+wbot web --config configs/app.json
 ```
 
 启动后打开浏览器访问：`http://127.0.0.1:8000`
@@ -130,22 +138,25 @@ Skill 依赖从 frontmatter 元数据读取：
 
 ### OpenClaw 档案结构（可选）
 
-支持按 OpenClaw 风格管理 Agent 档案。默认开启后会在工作区自动补齐以下文件/目录（若缺失）：
+支持按 OpenClaw 风格管理 Agent 档案。模板文件存放在 `w_bot/template/`，初始化时会复制到用户目录 `~/.wbot/` 并只补齐缺失项。
+
+默认模板包含：
 
 - `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`TOOLS.md`
-- `MEMORY.md`、`BOOTSTRAP.md`、`BOOT.md`、`HEARTBEAT.md`
-- `memory/`、`skills/`
+- `BOOTSTRAP.md`、`BOOT.md`、`HEARTBEAT.md`
+- `memory/MEMORY.md`、`memory/HISTORY.md`
+- `skills/`
 
 启动行为：
 
 - `IDENTITY/SOUL/AGENTS/USER/TOOLS/BOOT/HEARTBEAT` 会注入系统提示词上下文。
 - `BOOTSTRAP.md` 在启动时读取一次后自动删除（用完即删）。
-- 当 `memoryFilePath` 仍为默认值时，会优先使用 `MEMORY.md` 作为长期记忆文件。
+- 当 `memoryFilePath` 仍为默认值时，会优先使用 `memory/MEMORY.md` 作为长期记忆文件。
 
 相关配置项（`agent` 下）：
 
 - `enableOpenClawProfile`：是否启用 OpenClaw 档案加载，默认 `true`
-- `openClawProfileRootDir`：档案根目录，默认 `.`
+- `openClawProfileRootDir`：档案根目录，默认 `~/.wbot`
 - `openClawAutoInit`：是否自动补齐缺失档案文件，默认 `true`
 
 ### 关键文件

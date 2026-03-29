@@ -28,7 +28,11 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.setuptools.package-data]
+w_bot = ["template/**/*"]
+
 [project.scripts]
+wbot = "w_bot.__main__:main"
 w-bot = "w_bot.__main__:main"
 agents-cli = "w_bot.agents.cli:run_cli"
 agents-feishu = "w_bot.channels.feishu.gateway:main"

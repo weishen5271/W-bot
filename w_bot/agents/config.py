@@ -11,6 +11,7 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_APP_CONFIG_PATH = "configs/app.json"
+DEFAULT_OPENCLAW_PROFILE_ROOT_DIR = "~/.wbot"
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,7 @@ def load_settings(
             merged,
             "memoryFilePath",
             "memory_file_path",
-            default="MEMORY.MD",
+            default="memory/MEMORY.md",
         ),
         user_id=_string_value(merged, "userId", "user_id", default="cli_user"),
         session_id=_string_value(
@@ -330,11 +331,13 @@ def load_settings(
             "enable_openclaw_profile",
             default=True,
         ),
-        openclaw_profile_root_dir=_string_value(
-            merged,
-            "openClawProfileRootDir",
-            "openclaw_profile_root_dir",
-            default=".",
+        openclaw_profile_root_dir=normalize_openclaw_profile_root_dir(
+            _string_value(
+                merged,
+                "openClawProfileRootDir",
+                "openclaw_profile_root_dir",
+                default=DEFAULT_OPENCLAW_PROFILE_ROOT_DIR,
+            )
         ),
         openclaw_auto_init=_bool_value(
             merged,
@@ -426,7 +429,7 @@ def default_app_config() -> dict[str, Any]:
             "postgresDsn": "",
             "milvusUri": "http://<host>:19530",
             "memoryCollection": "w_bot_long_term_memory_cli",
-            "memoryFilePath": "MEMORY.MD",
+            "memoryFilePath": "memory/MEMORY.md",
             "userId": "feishu_bot",
             "sessionId": "",
             "sessionStateFilePath": ".w_bot_session.json",
@@ -473,7 +476,7 @@ def default_app_config() -> dict[str, Any]:
             },
             "exposeStepLogs": True,
             "enableOpenClawProfile": True,
-            "openClawProfileRootDir": ".",
+            "openClawProfileRootDir": DEFAULT_OPENCLAW_PROFILE_ROOT_DIR,
             "openClawAutoInit": True,
             "loopGuard": {
                 "recursionLimit": 20,
@@ -542,6 +545,13 @@ def _default_provider_configs() -> dict[str, dict[str, Any]]:
         "byteplus": {"apiKey": "", "apiBase": "", "extraHeaders": None},
         "byteplusCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None},
     }
+
+
+def normalize_openclaw_profile_root_dir(value: str) -> str:
+    normalized = (value or "").strip()
+    if normalized in {"", "."}:
+        return DEFAULT_OPENCLAW_PROFILE_ROOT_DIR
+    return normalized
 
 
 def _pick(data: dict[str, Any], *keys: str) -> Any:

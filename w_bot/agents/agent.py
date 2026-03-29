@@ -263,10 +263,10 @@ class WBotGraph:
                         token_callback=token_callback,
                         debug_callback=debug_callback,
                     )
-                except Exception:
+                except Exception as fallback_exc:
                     logger.exception("Text-only compatibility fallback failed")
                     _emit_status(config, "模型调用失败，已返回兜底提示。")
-                    response = AIMessage(content=_runtime_error_reply_text())
+                    response = AIMessage(content=_runtime_error_reply_text(fallback_exc))
             elif selected_route != "text":
                 logger.warning(
                     "Route=%s model failed; retry with text model, error=%s",
@@ -281,14 +281,14 @@ class WBotGraph:
                         token_callback=token_callback,
                         debug_callback=debug_callback,
                     )
-                except Exception:
+                except Exception as fallback_exc:
                     logger.exception("Route fallback to text model failed")
                     _emit_status(config, "模型调用失败，已返回兜底提示。")
-                    response = AIMessage(content=_runtime_error_reply_text())
+                    response = AIMessage(content=_runtime_error_reply_text(fallback_exc))
             else:
                 logger.exception("Text model invoke failed")
                 _emit_status(config, "模型调用失败，已返回兜底提示。")
-                response = AIMessage(content=_runtime_error_reply_text())
+                response = AIMessage(content=_runtime_error_reply_text(exc))
         logger.debug("LLM response received, has_tool_calls=%s", bool(response.tool_calls))
         if response.tool_calls:
             projected_history = [*sanitized_history, response]
@@ -1015,11 +1015,23 @@ def _build_text_only_retry_messages(
     ]
 
 
-def _runtime_error_reply_text() -> str:
+def _runtime_error_reply_text(exc: BaseException | None = None) -> str:
+    detail = _format_exception_brief(exc)
+    suffix = f"\n异常详情：{detail}" if detail else ""
     return (
-        "这次处理出现了临时异常，我没有中断服务。"
-        "请稍后重试，或简化问题后再发一次。"
+        "这次处理出现了临时异常，但服务没有中断。"
+        "你可以继续对话，或调整一下问题后再试。"
+        f"{suffix}"
     )
+
+
+def _format_exception_brief(exc: BaseException | None) -> str:
+    if exc is None:
+        return ""
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return type(exc).__name__
 
 
 def _to_text_content(content: Any) -> str:

@@ -45,22 +45,30 @@ cp configs/app.json.example configs/app.json
 # Then fill your real keys/secrets in configs/app.json
 ```
 
-4. Run:
+4. Initialize user profile files:
 
 ```bash
-python main.py cli --config configs/app.json
+wbot onboard
+```
+
+This creates `~/.wbot/` in the user's home directory and copies missing template files from `w_bot/template/` into it without overwriting existing files.
+
+5. Run the agent CLI:
+
+```bash
+wbot agent --config configs/app.json
 ```
 
 Feishu gateway mode:
 
 ```bash
-python main.py feishu --config configs/app.json
+wbot feishu --config configs/app.json
 ```
 
 Web UI mode:
 
 ```bash
-python main.py web --config configs/app.json
+wbot web --config configs/app.json
 ```
 
 Then open: `http://127.0.0.1:8000`
@@ -120,6 +128,17 @@ To use it, make sure:
 
 - `agent.enableExecTool=true` in config
 - host has `npx` available
+
+### OpenClaw Profile Files
+
+OpenClaw-style profile templates now live under `w_bot/template/`. During onboarding or auto-init, missing files are copied into `~/.wbot/` without overwriting existing ones.
+
+Default templates include:
+
+- `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`
+- `BOOTSTRAP.md`, `BOOT.md`, `HEARTBEAT.md`
+- `memory/MEMORY.md`, `memory/HISTORY.md`
+- `skills/`
 
 ### Key Files
 

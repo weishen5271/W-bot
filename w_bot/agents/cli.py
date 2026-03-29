@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+import traceback
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
 
@@ -239,6 +241,11 @@ def _repl(graph: Any, settings: Settings) -> None:
         latest_ai_text = ""
         seen_action_ids: set[str] = set()
         seen_text_ids: set[str] = set()
+        seen_tool_result_ids: set[str] = set()
+        tool_progress_stop = threading.Event()
+        tool_progress_thread: threading.Thread | None = None
+        active_tool_summary = ""
+        active_tool_started_at = 0.0
 
         def emit_status(text: str) -> None:
             # CLI 默认仅展示模型正文流，不展示中间状态。
@@ -260,6 +267,50 @@ def _repl(graph: Any, settings: Settings) -> None:
             token_state["emitted_text"] += delta
             token_state["pending_text"] += delta
             _flush_cli_stream_buffer(token_state, force=False)
+
+        def stop_tool_progress(*, announce: bool) -> None:
+            nonlocal tool_progress_thread
+            nonlocal active_tool_summary
+            nonlocal active_tool_started_at
+            if tool_progress_thread is None:
+                return
+            tool_progress_stop.set()
+            tool_progress_thread.join(timeout=0.2)
+            if announce and active_tool_summary:
+                elapsed = max(0.0, time.monotonic() - active_tool_started_at)
+                print(
+                    f"[Tool] {active_tool_summary} 执行结束，耗时 {elapsed:.1f}s",
+                    flush=True,
+                )
+            tool_progress_thread = None
+            active_tool_summary = ""
+            active_tool_started_at = 0.0
+            tool_progress_stop.clear()
+
+        def start_tool_progress(tool_summary: str) -> None:
+            nonlocal tool_progress_thread
+            nonlocal active_tool_summary
+            nonlocal active_tool_started_at
+            stop_tool_progress(announce=False)
+            active_tool_summary = tool_summary
+            active_tool_started_at = time.monotonic()
+            started_at = active_tool_started_at
+
+            def _heartbeat() -> None:
+                while not tool_progress_stop.wait(1.0):
+                    elapsed = max(0.0, time.monotonic() - started_at)
+                    print(
+                        f"[Tool] {tool_summary} 执行中... 已耗时 {elapsed:.1f}s",
+                        flush=True,
+                    )
+
+            print(f"[Tool] 开始执行: {tool_summary}", flush=True)
+            tool_progress_thread = threading.Thread(
+                target=_heartbeat,
+                name="wbot-cli-tool-progress",
+                daemon=True,
+            )
+            tool_progress_thread.start()
 
         config = {
             "configurable": {
@@ -283,11 +334,24 @@ def _repl(graph: Any, settings: Settings) -> None:
                     if msg_id not in seen_action_ids:
                         _flush_cli_stream_buffer(token_state, force=True)
                         seen_action_ids.add(msg_id)
-                        print(
-                            f"\n[LLM] tool_calls -> {', '.join(str(tc.get('name', '')).strip() or 'unknown' for tc in last.tool_calls)}",
-                            flush=True,
+                        tool_summary = ", ".join(
+                            str(tc.get("name", "")).strip() or "unknown" for tc in last.tool_calls
                         )
+                        print("", flush=True)
+                        print(f"[LLM] tool_calls -> {tool_summary}", flush=True)
+                        start_tool_progress(tool_summary)
+                if isinstance(last, ToolMessage):
+                    if msg_id not in seen_tool_result_ids:
+                        seen_tool_result_ids.add(msg_id)
+                        stop_tool_progress(announce=True)
+                        tool_result = _message_to_text(last).strip()
+                        preview = _tool_result_preview(tool_result)
+                        if preview:
+                            print(f"[Tool] 返回结果:\n{preview}", flush=True)
+                        else:
+                            print("[Tool] 返回结果为空。", flush=True)
                 if isinstance(last, AIMessage) and not last.tool_calls:
+                    stop_tool_progress(announce=False)
                     text = _message_to_text(last).strip()
                     if not text:
                         continue
@@ -295,13 +359,21 @@ def _repl(graph: Any, settings: Settings) -> None:
                     if not token_state["started"] and msg_id not in seen_text_ids:
                         seen_text_ids.add(msg_id)
                         print(f"W-bot > {text}", flush=True)
-        except Exception:
+        except Exception as exc:
             logger.exception("Conversation round failed but REPL will continue")
+            stop_tool_progress(announce=False)
+            _flush_cli_stream_buffer(token_state, force=True)
+            if token_state["started"]:
+                print("", flush=True)
             console.print(
                 "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]"
             )
+            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            if detail:
+                console.print(f"[red]异常详情：{detail}[/red]")
             continue
         finally:
+            stop_tool_progress(announce=False)
             clear_runtime_callbacks()
 
         _flush_cli_stream_buffer(token_state, force=True)
@@ -375,6 +447,15 @@ def _flush_cli_stream_buffer(token_state: dict[str, Any], *, force: bool) -> Non
     print(pending, end="", flush=True)
     token_state["pending_text"] = ""
     token_state["last_flush_at"] = now
+
+
+def _tool_result_preview(text: str, *, max_chars: int = 500) -> str:
+    normalized = text.strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars].rstrip()}..."
 
 
 if __name__ == "__main__":
