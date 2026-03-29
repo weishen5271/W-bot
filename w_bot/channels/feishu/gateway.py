@@ -18,13 +18,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
-from w_bot.agents.short_memory_optimizer import (
-    ShortTermMemoryOptimizationSettings,
-    start_short_memory_optimizer_worker,
-)
 from w_bot.agents.skills import SkillsLoader
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
@@ -99,7 +96,8 @@ class FeishuGateway:
         self._thread_prefix = thread_prefix
         self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
         self._seen_lock = threading.Lock()
-        self._graph_lock = threading.Lock()
+        self._graph_locks: dict[str, threading.Lock] = {}
+        self._graph_locks_guard = threading.Lock()
         self._session_lock = threading.Lock()
         self._session_overrides: dict[str, str] = {}
         self._client: Any | None = None
@@ -110,6 +108,15 @@ class FeishuGateway:
         if not self._media_root.is_absolute():
             self._media_root = Path.cwd() / self._media_root
         self._media_root.mkdir(parents=True, exist_ok=True)
+
+    def _graph_lock_for_session(self, session_id: str) -> threading.Lock:
+        normalized = session_id.strip() or "_default"
+        with self._graph_locks_guard:
+            lock = self._graph_locks.get(normalized)
+            if lock is None:
+                lock = threading.Lock()
+                self._graph_locks[normalized] = lock
+            return lock
 
     def start(self) -> None:
         """启动对应服务或流程。
@@ -274,6 +281,7 @@ class FeishuGateway:
             "configurable": {
                 "thread_id": session_id,
                 "status_callback": emit_status if self._expose_step_logs else None,
+                "defer_summary_update": True,
             },
             "recursion_limit": self._recursion_limit,
         }
@@ -288,32 +296,15 @@ class FeishuGateway:
             ]
         }
         latest_ai_text = ""
-        ai_order: list[str] = []
-        ai_text_by_id: dict[str, str] = {}
 
         try:
-            with self._graph_lock:
-                for event in self._graph.stream(inputs, config=config, stream_mode="values"):
-                    messages = event.get("messages", []) if isinstance(event, dict) else []
-                    if not messages:
-                        continue
-                    last = messages[-1]
-                    if isinstance(last, AIMessage) and not last.tool_calls:
-                        msg_id = getattr(last, "id", None) or f"{len(messages)}-thought"
-                        content = _message_to_text(last.content).strip()
-                        if content:
-                            if msg_id not in ai_text_by_id:
-                                ai_order.append(msg_id)
-                            ai_text_by_id[msg_id] = content
-                            latest_ai_text = content
+            with self._graph_lock_for_session(session_id):
+                result = self._graph.invoke(inputs, config=config)
         except Exception:
             logger.exception("Failed to process feishu chat round, session_id=%s", session_id)
             return "本轮处理出现异常，但服务仍在运行。请稍后重试。"
 
-        if ai_order:
-            latest_ai_text = "\n\n".join(
-                ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip()
-            )
+        latest_ai_text = _latest_ai_reply_from_result(result)
 
         if self._expose_step_logs and status_lines:
             status_block = "\n".join(f"- {line}" for line in status_lines)
@@ -807,14 +798,6 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         logger.warning("Feishu config loaded but channels.feishu.enabled=false")
     logger.info("Building graph for Feishu gateway")
 
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        logger.exception("Failed to import PostgresSaver")
-        raise RuntimeError(
-            "PostgresSaver import failed. Please install psycopg first: pip install 'psycopg[binary]'"
-        ) from exc
-
     llm_text = _build_llm(settings, model_name=settings.model_routing.text_model_name)
     llm_image = (
         _build_llm(settings, model_name=settings.model_routing.image_model_name)
@@ -852,25 +835,13 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
 
-    with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
+    short_term_memory_path = resolve_short_term_memory_path(settings.short_term_memory_path)
+    if settings.short_term_memory_optimization.enabled:
+        logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
+
+    with WorkspaceFileCheckpointer(short_term_memory_path) as checkpointer:
         if hasattr(checkpointer, "setup"):
             checkpointer.setup()
-
-        optimizer_settings = ShortTermMemoryOptimizationSettings(
-            enabled=settings.short_term_memory_optimization.enabled,
-            run_on_startup=settings.short_term_memory_optimization.run_on_startup,
-            interval_minutes=settings.short_term_memory_optimization.interval_minutes,
-            keep_recent_checkpoints=settings.short_term_memory_optimization.keep_recent_checkpoints,
-            summary_batch_size=settings.short_term_memory_optimization.summary_batch_size,
-            max_threads_per_run=settings.short_term_memory_optimization.max_threads_per_run,
-            max_checkpoints_per_thread=settings.short_term_memory_optimization.max_checkpoints_per_thread,
-            archive_before_delete=settings.short_term_memory_optimization.archive_before_delete,
-            compress_level=settings.short_term_memory_optimization.compress_level,
-        )
-        _, optimizer_stop_event = start_short_memory_optimizer_worker(
-            postgres_dsn=settings.postgres_dsn,
-            settings=optimizer_settings,
-        )
 
         graph = WBotGraph(
             llm=llm_text,
@@ -900,11 +871,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             expose_step_logs=settings.expose_step_logs,
             recursion_limit=settings.loop_guard.recursion_limit,
         )
-        try:
-            gateway.start()
-        finally:
-            if optimizer_stop_event is not None:
-                optimizer_stop_event.set()
+        gateway.start()
 
 
 def main() -> None:
@@ -1129,6 +1096,26 @@ def _message_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def _latest_ai_reply_from_result(result: Any) -> str:
+    values = result if isinstance(result, dict) else {}
+    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
+    ai_order: list[str] = []
+    ai_text_by_id: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.tool_calls:
+            continue
+        msg_id = str(getattr(message, "id", "") or f"{len(ai_order)}-thought")
+        text = _message_to_text(getattr(message, "content", "")).strip()
+        if not text:
+            continue
+        if msg_id not in ai_text_by_id:
+            ai_order.append(msg_id)
+        ai_text_by_id[msg_id] = text
+    if not ai_order:
+        return ""
+    return "\n\n".join(ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip())
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ W-bot 是一个基于 LangGraph 构建的 CLI Agent。
 
 ### 记忆架构
 
-- 短期记忆：通过 `PostgresSaver` 存储在 PostgreSQL 中，按 `session_id` 隔离。
+- 短期记忆：持久化到当前工作区 `memory/short_term_memory.pkl`，按 `session_id` 隔离。
 - 长期记忆：持久化到本地 `MEMORY.MD`。
 
 `MEMORY.MD` 结构：
@@ -22,13 +22,7 @@ W-bot 是一个基于 LangGraph 构建的 CLI Agent。
 
 ### 快速开始
 
-1. 启动 PostgreSQL：
-
-```bash
-docker compose up -d
-```
-
-2. 安装依赖：
+1. 安装依赖：
 
 ```bash
 python -m venv .venv
@@ -38,14 +32,14 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-3. 配置 app JSON：
+2. 配置 app JSON：
 
 ```bash
 cp configs/app.json.example configs/app.json
 # 然后在 configs/app.json 中填入真实 keys/secrets
 ```
 
-4. 初始化用户档案：
+3. 初始化用户档案：
 
 ```bash
 wbot onboard
@@ -53,7 +47,7 @@ wbot onboard
 
 该命令会在用户目录创建 `~/.wbot/`，并从 `w_bot/template/` 复制缺失模板进去，只补齐缺失文件，不覆盖已有文件。
 
-5. 运行 Agent CLI：
+4. 运行 Agent CLI：
 
 ```bash
 wbot agent --config configs/app.json
@@ -82,11 +76,8 @@ wbot web --config configs/app.json
 在 CLI 中输入 `/new` 可开启全新的会话上下文。
 
 所有运行时配置统一放在 `configs/app.json`。
-短期记忆优化可通过 `agent.shortTermMemoryOptimization` 配置，默认开启并包含：
-
-- 分级记忆：仅保留最近 `keepRecentCheckpoints` 条 checkpoint。
-- 摘要替代：历史 checkpoint 按 `summaryBatchSize` 写入 `checkpoint_rolling_summaries`。
-- 去重压缩：归档数据写入 `checkpoint_blob_store` 与 `checkpoint_cold_archive_entries`，随后删除原始历史记录。
+短期记忆默认写入工作区 `memory/short_term_memory.pkl`，可通过 `agent.shortTermMemoryPath` 修改路径。
+原有 `agent.shortTermMemoryOptimization` 配置仅适用于 PostgreSQL 方案，当前本地文件模式下会被忽略，建议关闭。
 
 多模态能力可通过 `agent.multimodal.enabled` 开关控制，默认模板已包含：
 
@@ -161,9 +152,10 @@ Skill 依赖从 frontmatter 元数据读取：
 
 ### 关键文件
 
-- `w_bot/agents/cli.py`：CLI 运行时与 Postgres checkpoint 连接。
+- `w_bot/agents/cli.py`：CLI 运行时与本地短期记忆 checkpoint 连接。
 - `w_bot/agents/agent.py`：LangGraph 节点与路由。
 - `w_bot/agents/context.py`：系统提示词组装（memory + skills）。
+- `w_bot/agents/file_checkpointer.py`：工作区本地短期记忆持久化。
 - `w_bot/agents/memory.py`：本地 `MEMORY.MD` 长期记忆存储。
 - `w_bot/agents/openclaw_profile.py`：OpenClaw 档案加载与启动期处理。
 - `w_bot/agents/skills.py`：skill 发现、可用性检查与摘要渲染。

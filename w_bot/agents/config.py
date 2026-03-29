@@ -25,8 +25,8 @@ class Settings:
     bailian_base_url: str
     bailian_model_name: str
     tavily_api_key: str
-    postgres_dsn: str
     memory_file_path: str
+    short_term_memory_path: str
     user_id: str
     session_id: str
     session_state_file_path: str
@@ -164,12 +164,17 @@ def load_settings(
             default=model_name_from_defaults,
         ),
         tavily_api_key=_string_value(merged, "tavilyApiKey", "tavily_api_key", default=""),
-        postgres_dsn=_must_value(merged, "postgresDsn", "postgres_dsn"),
         memory_file_path=_string_value(
             merged,
             "memoryFilePath",
             "memory_file_path",
             default="memory/MEMORY.md",
+        ),
+        short_term_memory_path=_string_value(
+            merged,
+            "shortTermMemoryPath",
+            "short_term_memory_path",
+            default="memory/short_term_memory.pkl",
         ),
         user_id=_string_value(merged, "userId", "user_id", default="cli_user"),
         session_id=_string_value(
@@ -426,10 +431,10 @@ def default_app_config() -> dict[str, Any]:
     return {
         "agent": {
             "tavilyApiKey": "",
-            "postgresDsn": "",
             "milvusUri": "http://<host>:19530",
             "memoryCollection": "w_bot_long_term_memory_cli",
             "memoryFilePath": "memory/MEMORY.md",
+            "shortTermMemoryPath": "memory/short_term_memory.pkl",
             "userId": "feishu_bot",
             "sessionId": "",
             "sessionStateFilePath": ".w_bot_session.json",

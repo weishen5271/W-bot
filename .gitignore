@@ -216,3 +216,6 @@ __marimo__/
 
 # Local lightweight sandbox runtime dir
 .sandbox/
+
+# Workspace short-term memory snapshots
+memory/*.pkl

@@ -2,31 +2,117 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 import traceback
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
 from .config import Settings, load_settings
+from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
 from .openclaw_profile import OpenClawProfileLoader
-from .short_memory_optimizer import (
-    ShortTermMemoryOptimizationSettings,
-    start_short_memory_optimizer_worker,
-)
 from .skills import SkillsLoader
 from .text_sanitizer import sanitize_user_text
 from .tools.runtime import build_tools
 
 console = Console()
 logger = get_logger(__name__)
+
+
+class CliThinkingSpinner:
+    def __init__(self, console_obj: Console) -> None:
+        self._console = console_obj
+        self._status = self._console.status("[dim]W-bot 正在思考...[/dim]", spinner="dots")
+        self._active = False
+
+    def start(self) -> None:
+        if self._active:
+            return
+        self._status.start()
+        self._active = True
+
+    def update(self, text: str) -> None:
+        if not self._active:
+            return
+        phase = _friendly_cli_phase(text)
+        if phase:
+            self._status.update(f"[dim]{phase}[/dim]")
+
+    def stop(self) -> None:
+        if not self._active:
+            return
+        self._status.stop()
+        self._active = False
+
+
+class CliStreamRenderer:
+    def __init__(self, console_obj: Console, *, render_markdown: bool = True) -> None:
+        self._console = console_obj
+        self._render_markdown = render_markdown
+        self._spinner = CliThinkingSpinner(console_obj)
+        self._spinner.start()
+        self._buffer = ""
+        self._live: Live | None = None
+        self._last_refresh_at = 0.0
+        self.stream_started = False
+
+    def update_status(self, text: str) -> None:
+        if self.stream_started:
+            return
+        self._spinner.update(text)
+
+    def _renderable(self, *, final: bool = False) -> Any:
+        if final and self._render_markdown and self._buffer.strip():
+            return Markdown(self._buffer)
+        return Text(self._buffer or "")
+
+    def on_delta(self, delta: str) -> None:
+        payload = delta or ""
+        if not payload:
+            return
+        self._buffer += payload
+        if self._live is None:
+            if not self._buffer.strip():
+                return
+            self._spinner.stop()
+            self._console.print()
+            self._console.print("[bold cyan]W-bot[/bold cyan]")
+            self._live = Live(self._renderable(final=False), console=self._console, auto_refresh=False)
+            self._live.start()
+            self.stream_started = True
+        now = time.monotonic()
+        if "\n" in payload or (now - self._last_refresh_at) > 0.02:
+            self._live.update(self._renderable(final=False))
+            self._live.refresh()
+            self._last_refresh_at = now
+
+    def finish(self, final_text: str = "") -> None:
+        final_payload = final_text or self._buffer
+        if self._live is not None:
+            if final_payload and final_payload != self._buffer:
+                self._buffer = final_payload
+            self._live.update(self._renderable(final=True))
+            self._live.refresh()
+            self._live.stop()
+            self._live = None
+            self._console.print()
+            self._spinner.stop()
+            return
+        self._spinner.stop()
+        self._buffer = final_payload
+        self._console.print()
+        self._console.print("[bold cyan]W-bot[/bold cyan]")
+        self._console.print(self._renderable(final=True))
+        self._console.print()
 
 
 class SessionStateStore:
@@ -76,15 +162,6 @@ def run_cli(config_path: str = "configs/app.json") -> None:
     Args:
         config_path: 目标路径参数，用于定位文件或目录。
     """
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        logger.exception("Failed to import PostgresSaver")
-        raise RuntimeError(
-            "PostgresSaver import failed. Please install psycopg first: "
-            "pip install 'psycopg[binary]'"
-        ) from exc
-
     settings = load_settings(config_path=config_path)
     setup_logging(enable_console_logs=settings.enable_console_logs)
     logger.info("Starting W-bot CLI runtime")
@@ -125,27 +202,15 @@ def run_cli(config_path: str = "configs/app.json") -> None:
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
 
-    logger.info("Initializing Postgres checkpointer")
-    with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
+    short_term_memory_path = resolve_short_term_memory_path(settings.short_term_memory_path)
+    logger.info("Initializing workspace short-term checkpointer: %s", short_term_memory_path)
+    if settings.short_term_memory_optimization.enabled:
+        logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
+
+    with WorkspaceFileCheckpointer(short_term_memory_path) as checkpointer:
         if hasattr(checkpointer, "setup"):
             logger.info("Running checkpointer setup")
             checkpointer.setup()
-
-        optimizer_settings = ShortTermMemoryOptimizationSettings(
-            enabled=settings.short_term_memory_optimization.enabled,
-            run_on_startup=settings.short_term_memory_optimization.run_on_startup,
-            interval_minutes=settings.short_term_memory_optimization.interval_minutes,
-            keep_recent_checkpoints=settings.short_term_memory_optimization.keep_recent_checkpoints,
-            summary_batch_size=settings.short_term_memory_optimization.summary_batch_size,
-            max_threads_per_run=settings.short_term_memory_optimization.max_threads_per_run,
-            max_checkpoints_per_thread=settings.short_term_memory_optimization.max_checkpoints_per_thread,
-            archive_before_delete=settings.short_term_memory_optimization.archive_before_delete,
-            compress_level=settings.short_term_memory_optimization.compress_level,
-        )
-        _, optimizer_stop_event = start_short_memory_optimizer_worker(
-            postgres_dsn=settings.postgres_dsn,
-            settings=optimizer_settings,
-        )
 
         graph = WBotGraph(
             llm=llm_text,
@@ -168,11 +233,7 @@ def run_cli(config_path: str = "configs/app.json") -> None:
         ).app
 
         logger.info("Graph ready, entering REPL loop")
-        try:
-            _repl(graph=graph, settings=settings)
-        finally:
-            if optimizer_stop_event is not None:
-                optimizer_stop_event.set()
+        _repl(graph=graph, settings=settings)
 
 
 def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
@@ -231,92 +292,24 @@ def _repl(graph: Any, settings: Settings) -> None:
             return
 
         logger.info("Received user input, len=%s", len(user_text))
-        print("Wbot is thinking....", flush=True)
-        token_state = {
-            "started": False,
-            "emitted_text": "",
-            "pending_text": "",
-            "last_flush_at": time.monotonic(),
-        }
+        renderer = CliStreamRenderer(console)
         latest_ai_text = ""
-        seen_action_ids: set[str] = set()
-        seen_text_ids: set[str] = set()
-        seen_tool_result_ids: set[str] = set()
-        tool_progress_stop = threading.Event()
-        tool_progress_thread: threading.Thread | None = None
-        active_tool_summary = ""
-        active_tool_started_at = 0.0
 
         def emit_status(text: str) -> None:
-            # CLI 默认仅展示模型正文流，不展示中间状态。
-            _ = text
+            renderer.update_status(text)
 
         def emit_token(text: str) -> None:
             payload = text or ""
             if not payload:
                 return
-            delta = payload
-            emitted = token_state["emitted_text"]
-            if emitted and payload.startswith(emitted):
-                delta = payload[len(emitted):]
-            if not delta:
-                return
-            if not token_state["started"]:
-                token_state["started"] = True
-                print("W-bot > ", end="", flush=True)
-            token_state["emitted_text"] += delta
-            token_state["pending_text"] += delta
-            _flush_cli_stream_buffer(token_state, force=False)
-
-        def stop_tool_progress(*, announce: bool) -> None:
-            nonlocal tool_progress_thread
-            nonlocal active_tool_summary
-            nonlocal active_tool_started_at
-            if tool_progress_thread is None:
-                return
-            tool_progress_stop.set()
-            tool_progress_thread.join(timeout=0.2)
-            if announce and active_tool_summary:
-                elapsed = max(0.0, time.monotonic() - active_tool_started_at)
-                print(
-                    f"[Tool] {active_tool_summary} 执行结束，耗时 {elapsed:.1f}s",
-                    flush=True,
-                )
-            tool_progress_thread = None
-            active_tool_summary = ""
-            active_tool_started_at = 0.0
-            tool_progress_stop.clear()
-
-        def start_tool_progress(tool_summary: str) -> None:
-            nonlocal tool_progress_thread
-            nonlocal active_tool_summary
-            nonlocal active_tool_started_at
-            stop_tool_progress(announce=False)
-            active_tool_summary = tool_summary
-            active_tool_started_at = time.monotonic()
-            started_at = active_tool_started_at
-
-            def _heartbeat() -> None:
-                while not tool_progress_stop.wait(1.0):
-                    elapsed = max(0.0, time.monotonic() - started_at)
-                    print(
-                        f"[Tool] {tool_summary} 执行中... 已耗时 {elapsed:.1f}s",
-                        flush=True,
-                    )
-
-            print(f"[Tool] 开始执行: {tool_summary}", flush=True)
-            tool_progress_thread = threading.Thread(
-                target=_heartbeat,
-                name="wbot-cli-tool-progress",
-                daemon=True,
-            )
-            tool_progress_thread.start()
+            renderer.on_delta(payload)
 
         config = {
             "configurable": {
                 "thread_id": current_session_id,
-                "status_callback": emit_status if settings.expose_step_logs else None,
+                "status_callback": emit_status,
                 "token_callback": emit_token,
+                "defer_summary_update": True,
             },
             "recursion_limit": settings.loop_guard.recursion_limit,
         }
@@ -324,47 +317,11 @@ def _repl(graph: Any, settings: Settings) -> None:
 
         set_runtime_callbacks(token_callback=emit_token, debug_callback=None)
         try:
-            for event in graph.stream(inputs, config=config, stream_mode="values"):
-                messages = event.get("messages", []) if isinstance(event, dict) else []
-                if not messages:
-                    continue
-                last = messages[-1]
-                msg_id = str(getattr(last, "id", "") or f"{len(messages)}-{type(last).__name__}")
-                if isinstance(last, AIMessage) and last.tool_calls:
-                    if msg_id not in seen_action_ids:
-                        _flush_cli_stream_buffer(token_state, force=True)
-                        seen_action_ids.add(msg_id)
-                        tool_summary = ", ".join(
-                            str(tc.get("name", "")).strip() or "unknown" for tc in last.tool_calls
-                        )
-                        print("", flush=True)
-                        print(f"[LLM] tool_calls -> {tool_summary}", flush=True)
-                        start_tool_progress(tool_summary)
-                if isinstance(last, ToolMessage):
-                    if msg_id not in seen_tool_result_ids:
-                        seen_tool_result_ids.add(msg_id)
-                        stop_tool_progress(announce=True)
-                        tool_result = _message_to_text(last).strip()
-                        preview = _tool_result_preview(tool_result)
-                        if preview:
-                            print(f"[Tool] 返回结果:\n{preview}", flush=True)
-                        else:
-                            print("[Tool] 返回结果为空。", flush=True)
-                if isinstance(last, AIMessage) and not last.tool_calls:
-                    stop_tool_progress(announce=False)
-                    text = _message_to_text(last).strip()
-                    if not text:
-                        continue
-                    latest_ai_text = text
-                    if not token_state["started"] and msg_id not in seen_text_ids:
-                        seen_text_ids.add(msg_id)
-                        print(f"W-bot > {text}", flush=True)
+            result = graph.invoke(inputs, config=config)
+            latest_ai_text = _latest_ai_reply_from_result(result)
         except Exception as exc:
             logger.exception("Conversation round failed but REPL will continue")
-            stop_tool_progress(announce=False)
-            _flush_cli_stream_buffer(token_state, force=True)
-            if token_state["started"]:
-                print("", flush=True)
+            renderer.finish("")
             console.print(
                 "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]"
             )
@@ -373,16 +330,11 @@ def _repl(graph: Any, settings: Settings) -> None:
                 console.print(f"[red]异常详情：{detail}[/red]")
             continue
         finally:
-            stop_tool_progress(announce=False)
             clear_runtime_callbacks()
 
-        _flush_cli_stream_buffer(token_state, force=True)
-        if token_state["started"]:
-            print("", flush=True)
-        elif latest_ai_text:
-            print(f"W-bot > {latest_ai_text}", flush=True)
-        else:
-            print("W-bot > 我收到了你的消息，但暂时没有生成可用回复。", flush=True)
+        if not latest_ai_text:
+            latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
+        renderer.finish(latest_ai_text)
 
 
 def _render_existing_session_history(
@@ -435,27 +387,51 @@ def _message_to_text(message: Any) -> str:
     return str(content)
 
 
-def _flush_cli_stream_buffer(token_state: dict[str, Any], *, force: bool) -> None:
-    pending = str(token_state.get("pending_text") or "")
-    if not pending:
-        return
-    now = time.monotonic()
-    last_flush_at = float(token_state.get("last_flush_at") or 0.0)
-    should_flush = force or ("\n" in pending) or (now - last_flush_at >= 0.05)
-    if not should_flush:
-        return
-    print(pending, end="", flush=True)
-    token_state["pending_text"] = ""
-    token_state["last_flush_at"] = now
-
-
-def _tool_result_preview(text: str, *, max_chars: int = 500) -> str:
-    normalized = text.strip()
-    if not normalized:
+def _latest_ai_reply_from_result(result: Any) -> str:
+    values = result if isinstance(result, dict) else {}
+    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
+    ai_order: list[str] = []
+    ai_text_by_id: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.tool_calls:
+            continue
+        msg_id = str(getattr(message, "id", "") or f"{len(ai_order)}-thought")
+        text = _message_to_text(message).strip()
+        if not text:
+            continue
+        if msg_id not in ai_text_by_id:
+            ai_order.append(msg_id)
+        ai_text_by_id[msg_id] = text
+    if not ai_order:
         return ""
-    if len(normalized) <= max_chars:
-        return normalized
-    return f"{normalized[:max_chars].rstrip()}..."
+    return "\n\n".join(ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip())
+
+
+def _friendly_cli_phase(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return "W-bot 正在思考..."
+    replacements = [
+        ("正在检索长期记忆上下文", "正在回忆相关上下文..."),
+        ("已加载", "已找到"),
+        ("条长期记忆", "条相关记忆"),
+        ("未命中长期记忆，继续直接回答。", "没有历史线索，直接开始回答..."),
+        ("正在整理对话上下文", "正在整理问题上下文..."),
+        ("已选择模型路由：text。", "已选择文本模型，准备回答..."),
+        ("已选择模型路由：image。", "已选择图像模型，准备回答..."),
+        ("已选择模型路由：audio。", "已选择音频模型，准备回答..."),
+        ("正在生成回复", "正在生成回复..."),
+        ("准备执行工具调用：", "正在调用工具: "),
+        ("检测到重复工具调用", "检测到重复工具调用，正在停止重试..."),
+        ("工具调用已达上限", "工具调用次数过多，正在停止本轮自动重试..."),
+        ("触发兼容回退：改用纯文本上下文重试。", "正在切换兼容模式后重试..."),
+        ("模型调用失败，已返回兜底提示。", "模型调用失败，正在返回兜底结果..."),
+        ("回复已生成。", "回复已生成。"),
+    ]
+    friendly = normalized
+    for source, target in replacements:
+        friendly = friendly.replace(source, target)
+    return friendly
 
 
 if __name__ == "__main__":

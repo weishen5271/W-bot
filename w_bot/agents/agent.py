@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -217,7 +218,11 @@ class WBotGraph:
                 len(sanitized_history),
             )
 
-        optimized = self._prepare_optimized_context(state=state, history=sanitized_history)
+        optimized = self._prepare_optimized_context(
+            state=state,
+            history=sanitized_history,
+            config=config,
+        )
         _emit_status(config, "正在整理对话上下文...")
         full_system_prompt = self._context_builder.build_system_prompt(
             base_prompt=system_prompt,
@@ -417,6 +422,7 @@ class WBotGraph:
         *,
         state: AgentState,
         history: list[AnyMessage],
+        config: RunnableConfig | None = None,
     ) -> dict[str, Any]:
         """处理prepare/optimized/context相关逻辑并返回结果。
         
@@ -438,6 +444,12 @@ class WBotGraph:
         unsummarized_count = max(0, target_end - summarized_count)
 
         if unsummarized_count >= self._token_opt.summary_trigger_messages:
+            if _should_defer_summary_update(config):
+                return {
+                    "conversation_summary": summary,
+                    "summarized_message_count": summarized_count,
+                    "recent_messages": history[summarized_count:] or history,
+                }
             delta = history[summarized_count:target_end]
             transcript = _messages_to_summary_text(delta)
             if transcript:
@@ -782,6 +794,15 @@ def _resolve_thread_id(config: RunnableConfig | None) -> str:
     return "-"
 
 
+def _should_defer_summary_update(config: RunnableConfig | None) -> bool:
+    if config is None or not hasattr(config, "get"):
+        return False
+    configurable = config.get("configurable")  # type: ignore[call-arg]
+    if not isinstance(configurable, dict):
+        return False
+    return bool(configurable.get("defer_summary_update"))
+
+
 def _invoke_llm_with_optional_stream(
     *,
     llm: Any,
@@ -791,6 +812,15 @@ def _invoke_llm_with_optional_stream(
 ) -> AIMessage:
     if token_callback is None:
         return llm.invoke(messages)
+
+    direct_stream_result = _invoke_openai_compatible_direct_stream(
+        llm=llm,
+        messages=messages,
+        token_callback=token_callback,
+        debug_callback=debug_callback,
+    )
+    if direct_stream_result is not None:
+        return direct_stream_result
 
     if debug_callback is not None:
         debug_callback("completion_start")
@@ -842,6 +872,109 @@ def _invoke_llm_with_optional_stream(
         emitted_any,
     )
     return merged
+
+
+def _invoke_openai_compatible_direct_stream(
+    *,
+    llm: Any,
+    messages: list[AnyMessage],
+    token_callback: Callable[[str], None],
+    debug_callback: Callable[[str], None] | None = None,
+) -> AIMessage | None:
+    chat_model = getattr(llm, "bound", llm)
+    binding_kwargs = getattr(llm, "kwargs", {}) if hasattr(llm, "bound") else {}
+    root_client = getattr(chat_model, "root_client", None)
+    build_payload = getattr(chat_model, "_get_request_payload", None)
+    if root_client is None or not callable(build_payload):
+        return None
+
+    try:
+        payload = build_payload(messages, **binding_kwargs)
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        stream = root_client.chat.completions.create(**payload)
+    except Exception:
+        logger.debug("Direct OpenAI-compatible stream setup failed", exc_info=True)
+        return None
+
+    if debug_callback is not None:
+        debug_callback("completion_start_direct")
+
+    content_parts: list[str] = []
+    tool_buffers: dict[int, dict[str, str]] = defaultdict(lambda: {"id": "", "name": "", "arguments": ""})
+    emitted_any = False
+    chunk_count = 0
+    text_chunk_count = 0
+    try:
+        for chunk in stream:
+            chunk_count += 1
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            text = getattr(delta, "content", None)
+            if isinstance(text, str) and text:
+                token_callback(text)
+                content_parts.append(text)
+                text_chunk_count += 1
+                if debug_callback is not None and not emitted_any:
+                    debug_callback("first_token_emitted_direct")
+                emitted_any = True
+
+            for tc in getattr(delta, "tool_calls", None) or []:
+                index = getattr(tc, "index", 0) or 0
+                entry = tool_buffers[index]
+                tc_id = getattr(tc, "id", None)
+                if isinstance(tc_id, str) and tc_id:
+                    entry["id"] = tc_id
+                function = getattr(tc, "function", None)
+                if function is None:
+                    continue
+                fn_name = getattr(function, "name", None)
+                if isinstance(fn_name, str) and fn_name:
+                    entry["name"] = fn_name
+                fn_args = getattr(function, "arguments", None)
+                if isinstance(fn_args, str) and fn_args:
+                    entry["arguments"] += fn_args
+    except Exception:
+        logger.debug("Direct OpenAI-compatible stream iteration failed", exc_info=True)
+        return None
+
+    tool_calls: list[dict[str, Any]] = []
+    for idx in sorted(tool_buffers):
+        item = tool_buffers[idx]
+        if not item["name"]:
+            continue
+        args_payload = item["arguments"].strip()
+        try:
+            args = json.loads(args_payload) if args_payload else {}
+        except Exception:
+            logger.debug("Failed to parse streamed tool arguments: %s", args_payload, exc_info=True)
+            args = {}
+        tool_calls.append(
+            {
+                "id": item["id"] or f"tool_call_{idx}",
+                "name": item["name"],
+                "args": args if isinstance(args, dict) else {},
+                "type": "tool_call",
+            }
+        )
+
+    if debug_callback is not None:
+        debug_callback(
+            f"completion_end_direct chunks={chunk_count} chunks_with_text={text_chunk_count} emitted_any={emitted_any}"
+        )
+    logger.info(
+        "Direct OpenAI-compatible stream stats: chunks=%s, chunks_with_text=%s, emitted_any=%s, tool_calls=%s",
+        chunk_count,
+        text_chunk_count,
+        emitted_any,
+        len(tool_calls),
+    )
+    return AIMessage(content="".join(content_parts), tool_calls=tool_calls)
 
 
 def _extract_stream_chunk_text(chunk: Any) -> str:

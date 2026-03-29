@@ -8,7 +8,7 @@ W-bot is a CLI agent built with LangGraph.
 
 ### Memory Architecture
 
-- Short-term memory: stored in PostgreSQL via `PostgresSaver`, isolated by `session_id`.
+- Short-term memory: persisted in the workspace at `memory/short_term_memory.pkl`, isolated by `session_id`.
 - Long-term memory: persisted to local `MEMORY.MD`.
 
 `MEMORY.MD` structure:
@@ -22,13 +22,7 @@ The file is automatically maintained by the `save_memory` tool.
 
 ### Quick Start
 
-1. Start PostgreSQL:
-
-```bash
-docker compose up -d
-```
-
-2. Install dependencies:
+1. Install dependencies:
 
 ```bash
 python -m venv .venv
@@ -38,14 +32,14 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-3. Configure app JSON:
+2. Configure app JSON:
 
 ```bash
 cp configs/app.json.example configs/app.json
 # Then fill your real keys/secrets in configs/app.json
 ```
 
-4. Initialize user profile files:
+3. Initialize user profile files:
 
 ```bash
 wbot onboard
@@ -53,7 +47,7 @@ wbot onboard
 
 This creates `~/.wbot/` in the user's home directory and copies missing template files from `w_bot/template/` into it without overwriting existing files.
 
-5. Run the agent CLI:
+4. Run the agent CLI:
 
 ```bash
 wbot agent --config configs/app.json

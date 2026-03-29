@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -14,19 +13,16 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from w_bot.agents.agent import message_kind
 from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
-from w_bot.agents.short_memory_optimizer import (
-    ShortTermMemoryOptimizationSettings,
-    start_short_memory_optimizer_worker,
-)
 from w_bot.agents.skills import SkillsLoader
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
@@ -83,14 +79,6 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
     if not cfg.web.enabled:
         logger.warning("Web config loaded but channels.web.enabled=false")
 
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        logger.exception("Failed to import PostgresSaver")
-        raise RuntimeError(
-            "PostgresSaver import failed. Please install psycopg first: pip install 'psycopg[binary]'"
-        ) from exc
-
     llm_text = _build_llm(settings, model_name=settings.model_routing.text_model_name)
     llm_image = (
         _build_llm(settings, model_name=settings.model_routing.image_model_name)
@@ -128,25 +116,13 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
 
-    with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
+    short_term_memory_path = resolve_short_term_memory_path(settings.short_term_memory_path)
+    if settings.short_term_memory_optimization.enabled:
+        logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
+
+    with WorkspaceFileCheckpointer(short_term_memory_path) as checkpointer:
         if hasattr(checkpointer, "setup"):
             checkpointer.setup()
-
-        optimizer_settings = ShortTermMemoryOptimizationSettings(
-            enabled=settings.short_term_memory_optimization.enabled,
-            run_on_startup=settings.short_term_memory_optimization.run_on_startup,
-            interval_minutes=settings.short_term_memory_optimization.interval_minutes,
-            keep_recent_checkpoints=settings.short_term_memory_optimization.keep_recent_checkpoints,
-            summary_batch_size=settings.short_term_memory_optimization.summary_batch_size,
-            max_threads_per_run=settings.short_term_memory_optimization.max_threads_per_run,
-            max_checkpoints_per_thread=settings.short_term_memory_optimization.max_checkpoints_per_thread,
-            archive_before_delete=settings.short_term_memory_optimization.archive_before_delete,
-            compress_level=settings.short_term_memory_optimization.compress_level,
-        )
-        _, optimizer_stop_event = start_short_memory_optimizer_worker(
-            postgres_dsn=settings.postgres_dsn,
-            settings=optimizer_settings,
-        )
 
         graph = WBotGraph(
             llm=llm_text,
@@ -174,11 +150,7 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
             expose_step_logs=settings.expose_step_logs,
             recursion_limit=settings.loop_guard.recursion_limit,
         )
-        try:
-            uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
-        finally:
-            if optimizer_stop_event is not None:
-                optimizer_stop_event.set()
+        uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
 
 
 def _build_app(
@@ -189,9 +161,19 @@ def _build_app(
     recursion_limit: int,
 ) -> FastAPI:
     app = FastAPI(title="W-bot Web Gateway")
-    graph_lock = threading.Lock()
+    session_locks: dict[str, threading.Lock] = {}
+    session_locks_guard = threading.Lock()
     static_root = Path(__file__).resolve().parent / "static"
     index_path = static_root / "index.html"
+
+    def _session_lock(session_id: str) -> threading.Lock:
+        normalized = session_id.strip() or "_default"
+        with session_locks_guard:
+            lock = session_locks.get(normalized)
+            if lock is None:
+                lock = threading.Lock()
+                session_locks[normalized] = lock
+            return lock
 
     @app.get("/")
     def read_index() -> FileResponse:
@@ -218,9 +200,10 @@ def _build_app(
     def get_history(session_id: str) -> HistoryResponse:
         if not session_id.strip():
             raise HTTPException(status_code=400, detail="session_id is required")
-        config = {"configurable": {"thread_id": session_id.strip()}}
+        normalized_session_id = session_id.strip()
+        config = {"configurable": {"thread_id": normalized_session_id}}
 
-        with graph_lock:
+        with _session_lock(normalized_session_id):
             try:
                 snapshot = graph.get_state(config)
             except Exception as exc:
@@ -249,39 +232,22 @@ def _build_app(
 
         session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
         config = {
-            "configurable": {"thread_id": session_id},
+            "configurable": {
+                "thread_id": session_id,
+                "defer_summary_update": True,
+            },
             "recursion_limit": recursion_limit,
         }
         inputs = {"messages": [HumanMessage(content=message)]}
-        latest_ai_text = ""
-        ai_order: list[str] = []
-        ai_text_by_id: dict[str, str] = {}
 
-        with graph_lock:
+        with _session_lock(session_id):
             try:
-                for event in graph.stream(inputs, config=config, stream_mode="values"):
-                    messages = event.get("messages", []) if isinstance(event, dict) else []
-                    if not messages:
-                        continue
-                    last = messages[-1]
-                    if isinstance(last, AIMessage) and not last.tool_calls:
-                        msg_id = getattr(last, "id", None) or f"{len(messages)}-thought"
-                        text = _message_to_text(last.content).strip()
-                        if text:
-                            prev = ai_text_by_id.get(msg_id, "")
-                            if msg_id not in ai_text_by_id:
-                                ai_order.append(msg_id)
-                            if text != prev:
-                                ai_text_by_id[msg_id] = text
-                            latest_ai_text = text
+                result = graph.invoke(inputs, config=config)
             except Exception as exc:
                 logger.exception("Failed to process web chat request")
                 raise HTTPException(status_code=500, detail="Chat processing failed") from exc
 
-        if ai_order:
-            latest_ai_text = "\n\n".join(
-                ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip()
-            )
+        latest_ai_text = _latest_ai_reply_from_result(result)
         if not latest_ai_text:
             latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
         return ChatResponse(session_id=session_id, reply=latest_ai_text)
@@ -293,178 +259,137 @@ def _build_app(
             raise HTTPException(status_code=400, detail="message is required")
 
         session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
-        token_queue: queue.Queue[tuple[str, str]] = queue.Queue()
-        done_event = threading.Event()
-        emitted_text = ""
-        token_event_count = 0
-        stream_id = 1
-        token_buffer = ""
-        token_flush_interval = 0.05
-        last_token_flush_at = time.monotonic()
-        streamed_any_token = False
-        current_segment_streamed = False
-        seen_status: set[str] = set()
-        token_queue.put(("thinking", "Wbot is thinking...."))
+        async def event_stream() -> Any:
+            loop = asyncio.get_running_loop()
+            event_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+            worker_done = threading.Event()
+            event_queue.put_nowait(("thinking", "Wbot is thinking...."))
 
-        def flush_token_buffer(*, force: bool) -> None:
-            nonlocal token_buffer
-            nonlocal last_token_flush_at
-            nonlocal token_event_count
-            nonlocal streamed_any_token
-            if not token_buffer:
-                return
-            now = time.monotonic()
-            should_flush = force or ("\n" in token_buffer) or (now - last_token_flush_at >= token_flush_interval)
-            if not should_flush:
-                return
-            token_event_count += 1
-            streamed_any_token = True
-            payload_json = json.dumps({"text": token_buffer, "stream_id": stream_id}, ensure_ascii=False)
-            token_queue.put(("token", payload_json))
-            if token_event_count == 1 or token_event_count % 20 == 0:
-                logger.info(
-                    "Web stream token enqueued: session_id=%s count=%s delta_len=%s stream_id=%s",
-                    session_id,
-                    token_event_count,
-                    len(token_buffer),
-                    stream_id,
-                )
-            token_buffer = ""
-            last_token_flush_at = now
+            def enqueue_event(event_name: str, payload: str) -> None:
+                loop.call_soon_threadsafe(event_queue.put_nowait, (event_name, payload))
 
-        def emit_stream_meta(*, stream_end: bool, resuming: bool) -> None:
-            token_queue.put(
-                (
-                    "stream_meta",
-                    json.dumps(
-                        {
-                            "stream_id": stream_id,
-                            "_stream_end": stream_end,
-                            "_resuming": resuming,
-                        },
+            def worker() -> None:
+                emitted_text = ""
+                token_event_count = 0
+                stream_id = 1
+                token_buffer = ""
+                token_flush_interval = 0.03
+                last_token_flush_at = time.monotonic()
+                streamed_any_token = False
+                current_segment_streamed = False
+                seen_status: set[str] = set()
+
+                def flush_token_buffer(*, force: bool) -> None:
+                    nonlocal token_buffer
+                    nonlocal last_token_flush_at
+                    nonlocal token_event_count
+                    nonlocal streamed_any_token
+                    if not token_buffer:
+                        return
+                    now = time.monotonic()
+                    should_flush = force or ("\n" in token_buffer) or (
+                        now - last_token_flush_at >= token_flush_interval
+                    )
+                    if not should_flush:
+                        return
+                    token_event_count += 1
+                    streamed_any_token = True
+                    payload_json = json.dumps(
+                        {"text": token_buffer, "stream_id": stream_id},
                         ensure_ascii=False,
-                    ),
-                )
-            )
+                    )
+                    enqueue_event("token", payload_json)
+                    if token_event_count == 1 or token_event_count % 20 == 0:
+                        logger.info(
+                            "Web stream token enqueued: session_id=%s count=%s delta_len=%s stream_id=%s",
+                            session_id,
+                            token_event_count,
+                            len(token_buffer),
+                            stream_id,
+                        )
+                    token_buffer = ""
+                    last_token_flush_at = now
 
-        def emit_token(text: str) -> None:
-            nonlocal token_buffer
-            nonlocal emitted_text
-            nonlocal current_segment_streamed
-            if text:
-                delta = text
-                if text.startswith(emitted_text):
-                    delta = text[len(emitted_text):]
-                if delta:
+                def emit_stream_meta(*, stream_end: bool, resuming: bool) -> None:
+                    enqueue_event(
+                        "stream_meta",
+                        json.dumps(
+                            {
+                                "stream_id": stream_id,
+                                "_stream_end": stream_end,
+                                "_resuming": resuming,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+
+                def emit_token(text: str) -> None:
+                    nonlocal token_buffer
+                    nonlocal emitted_text
+                    nonlocal current_segment_streamed
+                    if not text:
+                        return
+                    delta = text
+                    if text.startswith(emitted_text):
+                        delta = text[len(emitted_text):]
+                    if not delta:
+                        return
                     emitted_text += delta
-                if delta:
                     current_segment_streamed = True
                     token_buffer += delta
                     flush_token_buffer(force=False)
 
-        def emit_status(text: str) -> None:
-            normalized = text.strip()
-            if not normalized:
-                return
-            if normalized in seen_status:
-                return
-            seen_status.add(normalized)
-            logger.info("Web step status: session_id=%s status=%s", session_id, normalized)
-            token_queue.put(("status", normalized))
+                def emit_status(text: str) -> None:
+                    normalized = text.strip()
+                    if not normalized or normalized in seen_status:
+                        return
+                    seen_status.add(normalized)
+                    logger.info("Web step status: session_id=%s status=%s", session_id, normalized)
+                    enqueue_event("status", normalized)
 
-        def worker() -> None:
-            nonlocal stream_id
-            nonlocal emitted_text
-            nonlocal streamed_any_token
-            nonlocal current_segment_streamed
-            if expose_step_logs:
-                emit_status("请求已接收，开始处理。")
-            config = {
-                "configurable": {
-                    "thread_id": session_id,
-                    "token_callback": emit_token,
-                    "status_callback": emit_status if expose_step_logs else None,
-                },
-                "recursion_limit": recursion_limit,
-            }
-            inputs = {"messages": [HumanMessage(content=message)]}
-            latest_ai_text = ""
-            ai_order: list[str] = []
-            ai_text_by_id: dict[str, str] = {}
-            seen_tool_call_ids: set[str] = set()
-            try:
-                with graph_lock:
-                    for event in graph.stream(inputs, config=config, stream_mode="values"):
-                        messages = event.get("messages", []) if isinstance(event, dict) else []
-                        if not messages:
-                            continue
-                        last = messages[-1]
-                        msg_id = str(getattr(last, "id", "") or f"{len(messages)}-{type(last).__name__}")
-                        if isinstance(last, AIMessage) and last.tool_calls:
-                            if msg_id not in seen_tool_call_ids:
-                                seen_tool_call_ids.add(msg_id)
-                                flush_token_buffer(force=True)
-                                if current_segment_streamed:
-                                    emit_stream_meta(stream_end=True, resuming=False)
-                                stream_id += 1
-                                emitted_text = ""
-                                current_segment_streamed = False
-                                emit_stream_meta(stream_end=False, resuming=True)
-                            if expose_step_logs:
-                                emit_status(f"正在调用工具：{_summarize_tool_names(last.tool_calls)}")
-                        elif expose_step_logs and isinstance(last, ToolMessage):
-                            emit_status("工具调用已返回，正在整合结果。")
-                        if isinstance(last, AIMessage) and not last.tool_calls:
-                            ai_msg_id = getattr(last, "id", None) or f"{len(messages)}-thought"
-                            text = _message_to_text(last.content).strip()
-                            if text:
-                                prev = ai_text_by_id.get(ai_msg_id, "")
-                                if ai_msg_id not in ai_text_by_id:
-                                    ai_order.append(ai_msg_id)
-                                if text == prev:
-                                    continue
-                                ai_text_by_id[ai_msg_id] = text
-                                latest_ai_text = text
-                                if not (streamed_any_token or current_segment_streamed or token_buffer):
-                                    payload_json = json.dumps(
-                                        {"id": ai_msg_id, "text": text},
-                                        ensure_ascii=False,
-                                    )
-                                    token_queue.put(("ai_message", payload_json))
                 if expose_step_logs:
-                    emit_status("处理完成。")
-            except Exception:
-                logger.exception("Failed to process streaming web chat request")
-                token_queue.put(("error", "Chat processing failed"))
-            finally:
-                flush_token_buffer(force=True)
-                if ai_order:
-                    latest_ai_text = "\n\n".join(
-                        ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip()
-                    )
-                if not latest_ai_text:
-                    latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
-                if current_segment_streamed:
-                    emit_stream_meta(stream_end=True, resuming=False)
-                if not streamed_any_token:
-                    token_queue.put(
-                        (
+                    emit_status("请求已接收，开始处理。")
+                config = {
+                    "configurable": {
+                        "thread_id": session_id,
+                        "token_callback": emit_token,
+                        "status_callback": emit_status if expose_step_logs else None,
+                        "defer_summary_update": True,
+                    },
+                    "recursion_limit": recursion_limit,
+                }
+                inputs = {"messages": [HumanMessage(content=message)]}
+                try:
+                    with _session_lock(session_id):
+                        result = graph.invoke(inputs, config=config)
+                    if expose_step_logs:
+                        emit_status("处理完成。")
+                except Exception:
+                    logger.exception("Failed to process streaming web chat request")
+                    enqueue_event("error", "Chat processing failed")
+                    result = None
+                finally:
+                    flush_token_buffer(force=True)
+                    latest_ai_text = _latest_ai_reply_from_result(result)
+                    if not latest_ai_text:
+                        latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
+                    if not streamed_any_token:
+                        enqueue_event(
                             "ai_message",
                             json.dumps({"id": "final", "text": latest_ai_text}, ensure_ascii=False),
                         )
-                    )
-                token_queue.put(
-                    (
+                    enqueue_event(
                         "done",
-                        json.dumps({"reply": latest_ai_text, "_streamed": streamed_any_token}, ensure_ascii=False),
+                        json.dumps(
+                            {"reply": latest_ai_text, "_streamed": streamed_any_token},
+                            ensure_ascii=False,
+                        ),
                     )
-                )
-                done_event.set()
+                    worker_done.set()
 
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
 
-        async def event_stream() -> Any:
             emitted_any_token = False
             # Some clients/proxies buffer tiny chunks; send an initial SSE comment to force flush.
             yield ": stream-open\n\n"
@@ -472,15 +397,14 @@ def _build_app(
             heartbeat_at = time.monotonic()
             while True:
                 try:
-                    event, data = token_queue.get_nowait()
-                except queue.Empty:
-                    if done_event.is_set():
+                    event, data = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if worker_done.is_set():
                         break
                     now = time.monotonic()
                     if now - heartbeat_at >= 1.0:
                         heartbeat_at = now
                         yield ": ping\n\n"
-                    await asyncio.sleep(0.05)
                     continue
 
                 if event == "token":
@@ -621,17 +545,24 @@ def _sse_event(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-def _summarize_tool_names(tool_calls: list[dict[str, Any]]) -> str:
-    names: list[str] = []
-    for tool_call in tool_calls:
-        if not isinstance(tool_call, dict):
+def _latest_ai_reply_from_result(result: Any) -> str:
+    values = result if isinstance(result, dict) else {}
+    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
+    ai_order: list[str] = []
+    ai_text_by_id: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, AIMessage) or message.tool_calls:
             continue
-        name = str(tool_call.get("name") or "").strip()
-        if name:
-            names.append(name)
-    if not names:
-        return f"{len(tool_calls)} 个工具"
-    return ", ".join(names)
+        msg_id = str(getattr(message, "id", "") or f"{len(ai_order)}-thought")
+        text = _message_to_text(getattr(message, "content", "")).strip()
+        if not text:
+            continue
+        if msg_id not in ai_text_by_id:
+            ai_order.append(msg_id)
+        ai_text_by_id[msg_id] = text
+    if not ai_order:
+        return ""
+    return "\n\n".join(ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip())
 
 
 def _chunk_text(text: str, *, size: int) -> list[str]:

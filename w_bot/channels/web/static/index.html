@@ -126,6 +126,77 @@
       font-size: 13px;
     }
 
+    .assistant-card {
+      align-self: flex-start;
+      width: min(82%, 720px);
+      border: 1px solid rgba(3, 105, 161, 0.18);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(224, 242, 254, 0.72), rgba(255, 255, 255, 0.96));
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+      overflow: hidden;
+      animation: fadeIn 0.18s ease;
+    }
+
+    .assistant-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px 8px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    .assistant-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--primary-strong);
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+
+    .assistant-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #38bdf8;
+      box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.45);
+      animation: pulse 1.4s infinite;
+    }
+
+    .assistant-phase {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .assistant-body {
+      padding: 12px;
+      min-height: 58px;
+    }
+
+    .assistant-text {
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .assistant-text.is-streaming::after {
+      content: "";
+      display: inline-block;
+      width: 9px;
+      height: 1.15em;
+      margin-left: 3px;
+      vertical-align: -2px;
+      border-radius: 2px;
+      background: rgba(3, 105, 161, 0.7);
+      animation: blink 0.9s steps(1) infinite;
+    }
+
     .composer {
       border-top: 1px solid var(--border);
       padding: 14px;
@@ -163,6 +234,27 @@
       }
     }
 
+    @keyframes pulse {
+      0% {
+        box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.42);
+      }
+      70% {
+        box-shadow: 0 0 0 8px rgba(56, 189, 248, 0);
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+      }
+    }
+
+    @keyframes blink {
+      0%, 45% {
+        opacity: 1;
+      }
+      46%, 100% {
+        opacity: 0;
+      }
+    }
+
     @media (max-width: 640px) {
       body {
         padding: 10px;
@@ -178,6 +270,9 @@
       }
       .msg {
         max-width: 92%;
+      }
+      .assistant-card {
+        width: 92%;
       }
       .composer {
         flex-direction: column;
@@ -212,17 +307,58 @@
   let sessionId = localStorage.getItem(STORAGE_KEY) || "";
   let sending = false;
 
-  function addMessage(role, content) {
+  function addMessage(role, content, {autoScroll = true} = {}) {
     const div = document.createElement("div");
     div.className = `msg ${role}`;
     div.textContent = content;
     messagesEl.appendChild(div);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (autoScroll) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
     return div;
   }
 
   function updateSessionView() {
     sessionText.textContent = `session: ${sessionId || "-"}`;
+  }
+
+  function createAssistantCard() {
+    const card = document.createElement("div");
+    card.className = "assistant-card";
+
+    const meta = document.createElement("div");
+    meta.className = "assistant-meta";
+
+    const badge = document.createElement("div");
+    badge.className = "assistant-badge";
+
+    const dot = document.createElement("span");
+    dot.className = "assistant-dot";
+
+    const label = document.createElement("span");
+    label.textContent = "W-bot";
+
+    const phase = document.createElement("div");
+    phase.className = "assistant-phase";
+    phase.textContent = "正在理解你的问题...";
+
+    const body = document.createElement("div");
+    body.className = "assistant-body";
+
+    const text = document.createElement("div");
+    text.className = "assistant-text is-streaming";
+
+    badge.appendChild(dot);
+    badge.appendChild(label);
+    meta.appendChild(badge);
+    meta.appendChild(phase);
+    body.appendChild(text);
+    card.appendChild(meta);
+    card.appendChild(body);
+    messagesEl.appendChild(card);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    return {card, phase, text, dot};
   }
 
   async function createSessionAndLoadHistory() {
@@ -273,14 +409,15 @@
     sendBtn.disabled = true;
     addMessage("user", text);
     inputEl.value = "";
-    const statusMsgEl = addMessage("system", "Wbot is thinking....");
+    const assistantCard = createAssistantCard();
     const botMessageById = new Map();
-    let activeBotMsgEl = null;
+    let activeBotMsgEl = assistantCard.text;
 
     let streamText = "";
     let pendingRenderText = "";
     let lastRenderAt = performance.now();
     const renderIntervalMs = 50;
+    let renderScheduled = false;
     let thinkingTimer = null;
     const thinkingFrames = [
       "Wbot is thinking.",
@@ -292,10 +429,10 @@
     let pendingStatusText = "";
 
     function startThinking() {
-      statusMsgEl.textContent = thinkingFrames[thinkingIndex];
+      assistantCard.phase.textContent = thinkingFrames[thinkingIndex];
       thinkingTimer = setInterval(() => {
         thinkingIndex = (thinkingIndex + 1) % thinkingFrames.length;
-        statusMsgEl.textContent = thinkingFrames[thinkingIndex];
+        assistantCard.phase.textContent = thinkingFrames[thinkingIndex];
       }, 280);
     }
 
@@ -308,29 +445,49 @@
 
     startThinking();
 
+    function shouldStickToBottom() {
+      const threshold = 48;
+      return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= threshold;
+    }
+
+    function scrollToBottomIfNeeded(shouldStick) {
+      if (shouldStick) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+
     function flushRender(force = false) {
+      renderScheduled = false;
       if (!pendingRenderText) return;
       const now = performance.now();
       if (!force && !pendingRenderText.includes("\n") && now - lastRenderAt < renderIntervalMs) {
+        scheduleRender();
         return;
       }
       if (!activeBotMsgEl) {
-        activeBotMsgEl = addMessage("bot", "");
+        activeBotMsgEl = assistantCard.text;
       }
+      const stickToBottom = shouldStickToBottom();
       streamText += pendingRenderText;
       pendingRenderText = "";
       activeBotMsgEl.textContent = streamText;
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      scrollToBottomIfNeeded(stickToBottom);
       lastRenderAt = now;
+    }
+
+    function scheduleRender() {
+      if (renderScheduled) return;
+      renderScheduled = true;
+      requestAnimationFrame(() => flushRender(false));
     }
 
     function enqueueToken(textChunk) {
       if (!textChunk) return;
       if (!activeBotMsgEl) {
-        activeBotMsgEl = addMessage("bot", "");
+        activeBotMsgEl = assistantCard.text;
       }
       pendingRenderText += textChunk;
-      flushRender(false);
+      scheduleRender();
     }
 
     try {
@@ -389,16 +546,16 @@
             updateSessionView();
           } else if (event === "thinking" && parsed.text) {
             if (!hasToken) {
-              statusMsgEl.textContent = parsed.text;
+              assistantCard.phase.textContent = parsed.text;
             }
           } else if (event === "token" && parsed.text) {
             if (!hasToken) {
               hasToken = true;
               stopThinking();
-              statusMsgEl.textContent = pendingStatusText || "步骤状态: 正在生成回复...";
+              assistantCard.phase.textContent = pendingStatusText || "正在生成回复...";
             }
             if (parsed.stream_id) {
-              botMessageById.set(String(parsed.stream_id), activeBotMsgEl || addMessage("bot", ""));
+              botMessageById.set(String(parsed.stream_id), activeBotMsgEl || assistantCard.text);
               activeBotMsgEl = botMessageById.get(String(parsed.stream_id));
             }
             enqueueToken(parsed.text);
@@ -407,7 +564,7 @@
               const msgId = String(parsed.stream_id);
               if (parsed._resuming) {
                 if (!botMessageById.has(msgId)) {
-                  botMessageById.set(msgId, activeBotMsgEl || addMessage("bot", ""));
+                  botMessageById.set(msgId, activeBotMsgEl || assistantCard.text);
                 }
                 activeBotMsgEl = botMessageById.get(msgId);
               }
@@ -418,7 +575,7 @@
           } else if (event === "ai_message" && parsed.text) {
             hasToken = true;
             stopThinking();
-            statusMsgEl.textContent = pendingStatusText || "步骤状态: 正在生成回复...";
+            assistantCard.phase.textContent = pendingStatusText || "正在生成回复...";
             const msgId = String(parsed.id || "");
             const msgText = String(parsed.text || "");
             if (!msgText) {
@@ -427,25 +584,32 @@
             flushRender(true);
             if (msgId && botMessageById.has(msgId)) {
               const existing = botMessageById.get(msgId);
+              const stickToBottom = shouldStickToBottom();
               existing.textContent = msgText;
               activeBotMsgEl = existing;
+              scrollToBottomIfNeeded(stickToBottom);
             } else {
-              const nextEl = addMessage("bot", msgText);
+              const nextEl = assistantCard.text;
+              const stickToBottom = shouldStickToBottom();
+              nextEl.textContent = msgText;
               if (msgId) {
                 botMessageById.set(msgId, nextEl);
               }
               activeBotMsgEl = nextEl;
+              scrollToBottomIfNeeded(stickToBottom);
             }
           } else if (event === "status" && parsed.text) {
-            pendingStatusText = `步骤状态: ${parsed.text}`;
-            if (hasToken) {
-              statusMsgEl.textContent = pendingStatusText;
-            }
+            pendingStatusText = parsed.text;
+            assistantCard.phase.textContent = pendingStatusText;
           } else if (event === "done") {
             finalReply = parsed.reply || finalReply;
             stopThinking();
             flushRender(true);
-            statusMsgEl.textContent = "步骤状态: 处理完成。";
+            assistantCard.phase.textContent = "处理完成";
+            assistantCard.text.classList.remove("is-streaming");
+            assistantCard.dot.style.animation = "none";
+            assistantCard.dot.style.boxShadow = "none";
+            assistantCard.dot.style.background = "#22c55e";
           } else if (event === "error") {
             throw new Error(parsed.message || "流式请求失败");
           }
@@ -457,20 +621,21 @@
       if ((!activeBotMsgEl || !activeBotMsgEl.textContent) && finalReply) {
         streamText = finalReply;
         if (!activeBotMsgEl) {
-          activeBotMsgEl = addMessage("bot", streamText);
+          activeBotMsgEl = assistantCard.text;
+          activeBotMsgEl.textContent = streamText;
         } else {
           activeBotMsgEl.textContent = streamText;
         }
       }
     } catch (err) {
       stopThinking();
-      if (!activeBotMsgEl) {
-        activeBotMsgEl = addMessage("system", "");
-      } else {
-        activeBotMsgEl.className = "msg system";
-      }
-      activeBotMsgEl.textContent = `错误: ${err.message || String(err)}`;
-      statusMsgEl.textContent = "步骤状态: 失败。";
+      assistantCard.card.style.borderColor = "rgba(239, 68, 68, 0.28)";
+      assistantCard.phase.textContent = "处理失败";
+      assistantCard.text.classList.remove("is-streaming");
+      assistantCard.dot.style.animation = "none";
+      assistantCard.dot.style.boxShadow = "none";
+      assistantCard.dot.style.background = "#ef4444";
+      assistantCard.text.textContent = `错误: ${err.message || String(err)}`;
     } finally {
       stopThinking();
       sending = false;

@@ -1,10 +1,10 @@
 {
   "agent": {
     "tavilyApiKey": "",
-    "postgresDsn": "postgresql://<user>:<password>@<host>:5432/<database>",
     "milvusUri": "http://<host>:19530",
     "memoryCollection": "w_bot_long_term_memory_cli",
     "memoryFilePath": "memory/MEMORY.md",
+    "shortTermMemoryPath": "memory/short_term_memory.pkl",
     "userId": "cli_user",
     "sessionId": "",
     "sessionStateFilePath": ".w_bot_session.json",
@@ -39,7 +39,7 @@
       "summaryMaxChars": 1200
     },
     "shortTermMemoryOptimization": {
-      "enabled": true,
+      "enabled": false,
       "runOnStartup": true,
       "intervalMinutes": 15,
       "keepRecentCheckpoints": 120,
