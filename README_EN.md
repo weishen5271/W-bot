@@ -76,11 +76,19 @@ By default, the CLI resumes the previous short-term session automatically.
 Type `/new` in the CLI to start a brand new session context.
 
 All runtime settings are configured in `configs/app.json`.
-Short-term memory optimization is controlled by `agent.shortTermMemoryOptimization` (enabled by default), including:
+Short-term memory is stored in `memory/short_term_memory.pkl` by default and can be changed with `agent.shortTermMemoryPath`.
+The old `agent.shortTermMemoryOptimization` settings only applied to the PostgreSQL implementation and are ignored in the current local-file mode.
 
-- Tiered memory: keep only the latest `keepRecentCheckpoints` checkpoints.
-- Summary replacement: roll old checkpoints into `checkpoint_rolling_summaries` by `summaryBatchSize`.
-- Dedup + compression: archive blobs into `checkpoint_blob_store` + `checkpoint_cold_archive_entries`, then delete old raw records.
+### Multi-Agent Notes
+
+The current project runs as a single-agent workflow by default. It does not automatically decide to fan out into a real multi-agent execution plan.
+
+- The main graph is `retrieve_memories -> agent -> action -> agent`.
+- The `agent` node only decides whether the current model response contains `tool_calls`.
+- The `spawn` tool exists, but currently only writes a pending job into `.w_bot_spawn_jobs.jsonl`.
+- There is no built-in sub-agent launcher, result collector, or reducer loop yet.
+
+So the current implementation is more accurately described as "single agent + tool calls", not automatic multi-agent orchestration.
 
 Example MCP server config:
 
@@ -120,7 +128,6 @@ Builtin `clawhub` skill is included for downloading skills via:
 
 To use it, make sure:
 
-- `agent.enableExecTool=true` in config
 - host has `npx` available
 
 ### OpenClaw Profile Files
@@ -136,12 +143,13 @@ Default templates include:
 
 ### Key Files
 
-- `w_bot/agents/cli.py`: CLI runtime and Postgres checkpoint wiring.
+- `w_bot/agents/cli.py`: CLI runtime and local short-term memory checkpoint wiring.
 - `w_bot/agents/agent.py`: LangGraph nodes and routing.
 - `w_bot/agents/context.py`: system prompt assembly (memory + skills).
+- `w_bot/agents/file_checkpointer.py`: workspace-local short-term memory persistence.
 - `w_bot/agents/memory.py`: local `MEMORY.MD` long-term memory store.
 - `w_bot/agents/skills.py`: skill discovery, availability checks, and summary rendering.
-- `w_bot/agents/tools/runtime.py`: built-in tools and MCP dynamic tools.
+- `w_bot/agents/tools/runtime.py`: built-in tools and MCP dynamic tools. The `spawn` tool currently only records jobs and does not run a full multi-agent workflow.
 - `w_bot/channels/feishu/gateway.py`: Feishu channel gateway (WebSocket + agent interaction).
 - `w_bot/channels/web/gateway.py`: Web channel gateway (HTTP API + built-in chat page).
 - `configs/app.json`: unified app configuration (`agent + channels`).

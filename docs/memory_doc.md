@@ -5,7 +5,7 @@
 多数 Agent 项目并不是“不会回答”，而是“记不住”。  
 本文基于一个开源 CLI Agent 项目，拆解一套可直接落地的长短期记忆方案：
 
-1. 短期记忆通过 `PostgresSaver + thread_id` 保持会话连续。  
+1. 短期记忆通过工作区本地文件 `memory/short_term_memory.pkl + thread_id` 保持会话连续。  
 2. 长期记忆通过本地 `MEMORY.MD` 持久化用户偏好和项目事实。  
 3. 每轮对话前先检索长期记忆，再注入系统上下文，避免“存了但用不上”。  
 
@@ -43,13 +43,13 @@ F -->|execute_python| H["执行 Python"]
 F --> E
 E --> I["返回响应"]
 
-J["PostgresSaver(checkpointer)"] <---> E
+J["WorkspaceFileCheckpointer"] <---> E
 J <---> B
 ```
 
 系统中的两条记忆链路：
 
-1. `PostgresSaver` 管短期会话。  
+1. `WorkspaceFileCheckpointer` 管短期会话。  
 2. `MEMORY.MD` 管长期知识。  
 
 ---
@@ -62,7 +62,7 @@ J <---> B
 
 ```python
 # w_bot/agents/cli.py
-with PostgresSaver.from_conn_string(settings.postgres_dsn) as checkpointer:
+with WorkspaceFileCheckpointer(settings.short_term_memory_path) as checkpointer:
     if hasattr(checkpointer, "setup"):
         checkpointer.setup()
 
@@ -105,6 +105,13 @@ if user_text.lower() == "/new":
 
 1. CLI 重启后自动恢复上次会话。  
 2. `/new` 一键开启新上下文，避免线程污染。  
+3. 短期记忆随工作区一起落地，不再依赖 PostgreSQL。  
+
+短期记忆默认文件路径：
+
+1. 默认写入工作区 `memory/short_term_memory.pkl`。  
+2. 可通过 `agent.shortTermMemoryPath` 修改。  
+3. 旧的 `shortTermMemoryOptimization` 配置属于 PostgreSQL 方案，当前本地文件模式下不会生效。  
 
 ---
 
@@ -258,6 +265,58 @@ def _score_text(text: str, query: str) -> int:
         return max(3, len(query))
 
     text_l = text.lower()
+
+---
+
+## 七、当前不是自动多 Agent 架构
+
+当前项目默认采用的是单 Agent 执行流，不会自动判断“任务复杂就拆成多个 Agent 并行执行”。
+
+实际运行图在代码里是：
+
+1. `retrieve_memories -> agent -> action -> agent`
+2. `agent` 节点负责调用模型。
+3. 如果模型返回 `tool_calls`，才会进入 `ToolNode`。
+4. 如果没有 `tool_calls`，本轮直接结束。
+
+这意味着当前系统判断的是“是否需要调工具”，不是“是否需要启动多 Agent”。
+
+### 为什么会让人误以为支持多 Agent
+
+项目里确实提供了一个 `spawn` 工具，但它目前只是一个轻量占位接口。
+
+```python
+# w_bot/agents/tools/runtime.py
+@tool
+def spawn(task: str, context: str = "") -> str:
+    job = {
+        "id": uuid.uuid4().hex,
+        "task": task,
+        "context": context,
+        "status": "pending",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _append_jsonl(workspace_root / ".w_bot_spawn_jobs.jsonl", job)
+    return f"Spawned task: id={job['id']}"
+```
+
+它当前只做了：
+
+1. 记录一条待处理任务。  
+2. 把任务写入 `.w_bot_spawn_jobs.jsonl`。  
+
+它还没有做：
+
+1. 拉起子 Agent。  
+2. 跟踪子任务执行状态。  
+3. 回收子 Agent 输出。  
+4. 把多个结果汇总回主 Agent。  
+
+所以当前更准确的工程描述应当是：
+
+1. 单 Agent。  
+2. 支持工具调用。  
+3. 预留了多 Agent 扩展入口，但尚未形成自动编排闭环。  
     tokens = _tokenize(query)
     score = 0
     for token in tokens:

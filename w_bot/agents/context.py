@@ -20,29 +20,21 @@ class ContextBuilder:
         self._skills_loader = skills_loader
         self._openclaw_profile_loader = openclaw_profile_loader
 
-    def build_system_prompt(
+    def build_static_system_prompt(
         self,
         *,
         base_prompt: str,
-        memory_context: str,
-        conversation_summary: str = "",
     ) -> str:
-        """组装系统提示词，合并基础提示、记忆和技能上下文。
+        """组装回合内可复用的系统提示词固定部分。
         
         Args:
             base_prompt: 基础系统提示词模板。
-            memory_context: 已检索的长期记忆文本。
-            conversation_summary: 历史对话压缩后的摘要文本。
         """
         blocks: list[str] = [base_prompt.strip()]
         if self._openclaw_profile_loader is not None:
             profile_context = self._openclaw_profile_loader.render_profile_context().strip()
             if profile_context:
                 blocks.append(f"OpenClaw 档案上下文:\n{profile_context}")
-
-        blocks.append(f"已检索到的长期记忆:\n{memory_context or '无'}")
-        if conversation_summary.strip():
-            blocks.append(f"会话摘要（历史压缩）:\n{conversation_summary.strip()}")
 
         if self._skills_loader is None:
             return "\n\n".join(blocks)
@@ -65,4 +57,20 @@ class ContextBuilder:
             "未使用 skill 时在答复中给一句原因。\n"
             f"{summary}"
         )
+        return "\n\n".join(blocks)
+
+    def build_system_prompt(
+        self,
+        *,
+        base_prompt: str,
+        memory_context: str,
+        conversation_summary: str = "",
+    ) -> str:
+        """组装完整系统提示词，合并固定部分与动态上下文。"""
+        blocks = [
+            self.build_static_system_prompt(base_prompt=base_prompt),
+            f"已检索到的长期记忆:\n{memory_context or '无'}",
+        ]
+        if conversation_summary.strip():
+            blocks.append(f"会话摘要（历史压缩）:\n{conversation_summary.strip()}")
         return "\n\n".join(blocks)

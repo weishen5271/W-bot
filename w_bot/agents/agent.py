@@ -55,6 +55,7 @@ class AgentState(TypedDict):
     long_term_context: str
     conversation_summary: str
     summarized_message_count: int
+    prepared_system_prompt_base: str
 
 
 class WBotGraph:
@@ -130,11 +131,13 @@ class WBotGraph:
 
         graph_builder = StateGraph(AgentState)
         graph_builder.add_node("retrieve_memories", self._retrieve_memories)
+        graph_builder.add_node("prepare_prompt_context", self._prepare_prompt_context)
         graph_builder.add_node("agent", self._agent)
         graph_builder.add_node("action", ToolNode(tools))
 
         graph_builder.add_edge(START, "retrieve_memories")
-        graph_builder.add_edge("retrieve_memories", "agent")
+        graph_builder.add_edge("retrieve_memories", "prepare_prompt_context")
+        graph_builder.add_edge("prepare_prompt_context", "agent")
         graph_builder.add_conditional_edges(
             "agent",
             self._route_after_agent,
@@ -199,15 +202,7 @@ class WBotGraph:
             state: Agent 当前状态字典。
             _: 占位参数，不参与业务逻辑。
         """
-        system_prompt = (
-            "你是 W-bot CLI Agent。"
-            "优先给出清晰、可执行的答案。"
-            "用户点名 skill 时优先使用；否则按意图匹配最小必要 skill，命中后先读 SKILL.md 再执行。"
-            "未使用 skill 时简要说明原因。"
-            "需要精确计算、脚本验证或数据处理时使用 execute_python。"
-            "当用户偏好、长期事实或关键经验值得保留时调用 save_memory。"
-            "工具调用参数必须严格匹配 schema。"
-        )
+        system_prompt = _base_system_prompt()
         memory_context = state.get("long_term_context") or "无"
         history = state.get("messages", [])
         sanitized_history = sanitize_messages_for_llm(history)
@@ -224,11 +219,18 @@ class WBotGraph:
             config=config,
         )
         _emit_status(config, "正在整理对话上下文...")
-        full_system_prompt = self._context_builder.build_system_prompt(
-            base_prompt=system_prompt,
-            memory_context=memory_context,
-            conversation_summary=optimized["conversation_summary"],
+        prepared_base_prompt = str(
+            state.get("prepared_system_prompt_base")
+            or self._context_builder.build_static_system_prompt(base_prompt=system_prompt)
         )
+        prompt_blocks = [
+            prepared_base_prompt,
+            f"已检索到的长期记忆:\n{memory_context or '无'}",
+        ]
+        conversation_summary = optimized["conversation_summary"].strip()
+        if conversation_summary:
+            prompt_blocks.append(f"会话摘要（历史压缩）:\n{conversation_summary}")
+        full_system_prompt = "\n\n".join(prompt_blocks)
         messages: list[AnyMessage] = [
             SystemMessage(content=full_system_prompt),
             *normalize_messages_for_llm(
@@ -341,6 +343,20 @@ class WBotGraph:
             "messages": [response],
             "conversation_summary": optimized["conversation_summary"],
             "summarized_message_count": optimized["summarized_message_count"],
+        }
+
+    def _prepare_prompt_context(
+        self,
+        state: AgentState,
+        config: RunnableConfig | None = None,
+    ) -> dict[str, str]:
+        """预先构建当前回合内可复用的系统提示词固定部分。"""
+        system_prompt = _base_system_prompt()
+        _emit_status(config, "正在准备回合级提示词上下文...")
+        return {
+            "prepared_system_prompt_base": self._context_builder.build_static_system_prompt(
+                base_prompt=system_prompt,
+            )
         }
 
     @staticmethod
@@ -532,6 +548,18 @@ def _extract_last_user_message(messages: list[AnyMessage]) -> str:
                 return _human_blocks_to_text(message.content)
             return content
     return ""
+
+
+def _base_system_prompt() -> str:
+    return (
+        "你是 W-bot CLI Agent。"
+        "优先给出清晰、可执行的答案。"
+        "用户点名 skill 时优先使用；否则按意图匹配最小必要 skill，命中后先读 SKILL.md 再执行。"
+        "未使用 skill 时简要说明原因。"
+        "需要命令行检查、脚本验证、精确计算或数据处理时优先使用 exec。"
+        "修改文件时优先使用 modify_file；读取文件时使用 read_file。"
+        "工具调用参数必须严格匹配 schema。"
+    )
 
 
 def message_kind(message: AnyMessage) -> str:

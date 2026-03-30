@@ -79,6 +79,16 @@ wbot web --config configs/app.json
 短期记忆默认写入工作区 `memory/short_term_memory.pkl`，可通过 `agent.shortTermMemoryPath` 修改路径。
 原有 `agent.shortTermMemoryOptimization` 配置仅适用于 PostgreSQL 方案，当前本地文件模式下会被忽略，建议关闭。
 
+### 多 Agent 说明
+
+当前项目默认是单 Agent 执行模型，不会自动判断并开启真正的多 Agent 协作。
+
+- 主流程是 `retrieve_memories -> agent -> action -> agent`。
+- `agent` 节点只判断当前回复是否包含 `tool_calls`，有则进入 `ToolNode`，否则结束。
+- 工具层虽然提供了 `spawn` 接口，但目前只是把任务写入 `.w_bot_spawn_jobs.jsonl`，还没有子 Agent 拉起、结果回收、汇总归并这套闭环。
+
+因此目前更准确的描述是“单 Agent + 工具调用”，而不是“自动多 Agent 编排”。
+
 多模态能力可通过 `agent.multimodal.enabled` 开关控制，默认模板已包含：
 
 - 飞书图片会下载到本地 `media/` 并以原生图像块送入模型。
@@ -124,7 +134,6 @@ Skill 依赖从 frontmatter 元数据读取：
 
 使用前请确保：
 
-- 配置中 `agent.enableExecTool=true`
 - 运行环境有 `npx`
 
 ### OpenClaw 档案结构（可选）
@@ -160,6 +169,7 @@ Skill 依赖从 frontmatter 元数据读取：
 - `w_bot/agents/openclaw_profile.py`：OpenClaw 档案加载与启动期处理。
 - `w_bot/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
 - `w_bot/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
+- `w_bot/agents/tools/runtime.py` 中的 `spawn`：当前只记录待处理任务，不会自动执行多 Agent 编排。
 - `w_bot/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。
 - `w_bot/channels/web/gateway.py`：Web 通道网关（HTTP API + 内置聊天页面）。
 - `configs/app.json`：统一应用配置（`agent + channels`）。

@@ -829,7 +829,6 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         memory_store=memory_store,
         user_id=settings.user_id,
         tavily_api_key=settings.tavily_api_key,
-        enable_exec_tool=settings.enable_exec_tool,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,

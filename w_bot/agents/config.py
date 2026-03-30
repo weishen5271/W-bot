@@ -31,7 +31,6 @@ class Settings:
     session_id: str
     session_state_file_path: str
     retrieve_top_k: int
-    enable_exec_tool: bool
     enable_cron_service: bool
     mcp_servers: list[dict[str, Any]]
     enable_skills: bool
@@ -190,7 +189,6 @@ def load_settings(
             default=".w_bot_session.json",
         ),
         retrieve_top_k=_int_value(merged, "retrieveTopK", "retrieve_top_k", default=4),
-        enable_exec_tool=_bool_value(merged, "enableExecTool", "enable_exec_tool", default=False),
         enable_cron_service=_bool_value(
             merged,
             "enableCronService",
@@ -439,7 +437,6 @@ def default_app_config() -> dict[str, Any]:
             "sessionId": "",
             "sessionStateFilePath": ".w_bot_session.json",
             "retrieveTopK": 4,
-            "enableExecTool": False,
             "enableCronService": False,
             "mcpServers": [],
             "enableSkills": True,

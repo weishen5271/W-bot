@@ -1,15 +1,15 @@
 # TOOLS
 
 ## 内置工具优先级
-1. 文件工具：`read_file` / `write_file` / `edit_file` / `list_dir`
-2. 记忆工具：`save_memory`
-3. 网络工具：`web_search` / `web_fetch`
-4. 执行工具：`execute_python`（仅在启用时）
+1. 文件工具：`read_file` / `modify_file` / `list_dir`
+2. 网络工具：`web_search` / `web_fetch`
+3. 执行工具：`exec`
+4. 协作工具：`message` / `spawn`
 
 ## 使用规范
 - 能用最小工具完成就不叠加复杂工具链。
 - 读文件先小范围读取，避免无意义大段加载。
-- 写文件遵循最小改动，保持与现有风格一致。
+- 修改文件遵循最小改动，保持与现有风格一致。
 - 网络结果用于补充事实，结论要结合本地上下文。
 
 ## 风险控制

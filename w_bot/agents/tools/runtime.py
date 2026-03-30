@@ -26,7 +26,6 @@ def build_tools(
     memory_store: LongTermMemoryStore,
     user_id: str,
     tavily_api_key: str,
-    enable_exec_tool: bool,
     enable_cron_service: bool,
     mcp_servers: list[dict[str, Any]] | None,
     extra_readonly_dirs: list[str] | None = None,
@@ -37,7 +36,6 @@ def build_tools(
         memory_store: 长期记忆存储实例，用于检索与保存记忆。
         user_id: 业务对象唯一标识。
         tavily_api_key: Tavily 搜索服务 API Key。
-        enable_exec_tool: 是否启用本地执行工具。
         enable_cron_service: 是否启用定时服务工具。
         mcp_servers: MCP 服务配置列表。
         extra_readonly_dirs: 额外只读目录列表。
@@ -79,40 +77,45 @@ def build_tools(
         return "\n".join(snippet)
 
     @tool
-    def write_file(path: str, content: str, overwrite: bool = True) -> str:
-        """处理write/file相关逻辑并返回结果。
+    def modify_file(
+        path: str,
+        mode: str,
+        content: str = "",
+        find_text: str = "",
+        replace_text: str = "",
+        replace_all: bool = False,
+        overwrite: bool = True,
+    ) -> str:
+        """创建、覆盖或按查找替换方式修改工作区文件。
         
         Args:
             path: 文件路径。
-            content: 消息内容主体。
-            overwrite: 是否覆盖已有内容。
+            mode: 修改模式，仅支持 create、replace、patch。
+            content: create/replace 模式下写入的完整内容。
+            find_text: patch 模式下要查找的文本。
+            replace_text: patch 模式下替换成的文本。
+            replace_all: patch 模式下是否替换全部命中。
+            overwrite: create 模式下若文件已存在是否覆盖。
         """
+
+        normalized_mode = (mode or "").strip().lower()
+        if normalized_mode not in {"create", "replace", "patch"}:
+            return "Invalid mode. Supported values: create, replace, patch"
 
         try:
             target = _resolve_workspace_path(path, workspace_root=workspace_root)
         except ValueError as exc:
             return str(exc)
-        if target.exists() and not overwrite:
-            return f"File already exists and overwrite=false: {target}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} chars to {target}"
 
-    @tool
-    def edit_file(path: str, find_text: str, replace_text: str, replace_all: bool = False) -> str:
-        """处理edit/file相关逻辑并返回结果。
-        
-        Args:
-            path: 文件路径。
-            find_text: 文本参数，作为本次处理的输入内容。
-            replace_text: 文本参数，作为本次处理的输入内容。
-            replace_all: 是否替换全部匹配项。
-        """
+        if normalized_mode in {"create", "replace"}:
+            existed_before = target.exists()
+            if target.exists() and normalized_mode == "create" and not overwrite:
+                return f"File already exists and overwrite=false: {target}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            action = "Created" if normalized_mode == "create" and not existed_before else "Wrote"
+            return f"{action} {len(content)} chars to {target}"
 
-        try:
-            target = _resolve_workspace_path(path, workspace_root=workspace_root)
-        except ValueError as exc:
-            return str(exc)
         if not target.exists() or not target.is_file():
             return f"File not found: {target}"
         source = target.read_text(encoding="utf-8")
@@ -251,48 +254,19 @@ def build_tools(
         _append_jsonl(workspace_root / ".w_bot_spawn_jobs.jsonl", job)
         return f"Spawned task: id={job['id']}"
 
-    @tool
-    def execute_python(code: str) -> str:
-        """处理execute/python相关逻辑并返回结果。
-        
-        Args:
-            code: 待执行的 Python 代码。
-        """
-
-        logger.info("Executing Python code in local sandbox, code_len=%s", len(code))
-        return _run_python_in_local_sandbox(code=code, sandbox_root=sandbox_root)
-
-    @tool
-    def save_memory(text: str, memory_type: str = "experience") -> str:
-        """保存数据到持久化存储。
-        
-        Args:
-            text: 待处理文本。
-            memory_type: 类型标识参数，用于选择处理策略。
-        """
-
-        doc_id = memory_store.save(user_id=user_id, text=text, memory_type=memory_type)
-        if not doc_id:
-            return "Memory backend unavailable"
-        return f"Memory saved, id={doc_id}"
-
     tools.extend(
         [
             read_file,
-            write_file,
-            edit_file,
+            modify_file,
             list_dir,
             web_search,
             web_fetch,
             message,
             spawn,
-            execute_python,
-            save_memory,
         ]
     )
 
-    if enable_exec_tool:
-        tools.append(_build_exec_tool(workspace_root=workspace_root))
+    tools.append(_build_exec_tool(workspace_root=workspace_root, sandbox_root=sandbox_root))
 
     if enable_cron_service:
         tools.append(_build_cron_tool(workspace_root=workspace_root))
@@ -303,7 +277,7 @@ def build_tools(
     return tools
 
 
-def _build_exec_tool(*, workspace_root: Path) -> StructuredTool:
+def _build_exec_tool(*, workspace_root: Path, sandbox_root: Path) -> StructuredTool:
     """构建并返回目标对象。
     
     Args:
@@ -317,9 +291,16 @@ def _build_exec_tool(*, workspace_root: Path) -> StructuredTool:
             timeout_sec: 请求超时时间（秒）。
         """
 
+        normalized = (command or "").strip()
+        if not normalized:
+            return "Command is empty"
+        if _looks_like_python_source(normalized):
+            logger.info("Executing inline Python via exec tool, code_len=%s", len(normalized))
+            return _run_python_in_local_sandbox(code=normalized, sandbox_root=sandbox_root)
+
         try:
             completed = subprocess.run(
-                command,
+                normalized,
                 shell=True,
                 cwd=str(workspace_root),
                 capture_output=True,
@@ -341,7 +322,11 @@ def _build_exec_tool(*, workspace_root: Path) -> StructuredTool:
     return StructuredTool.from_function(
         func=_exec,
         name="exec",
-        description="Execute a shell command in local workspace.",
+        description=(
+            "Execute a shell command in the local workspace and return its output. "
+            "If the input is raw Python source code instead of a shell command, "
+            "run it in the local Python sandbox."
+        ),
     )
 
 
@@ -399,6 +384,27 @@ def _run_python_in_local_sandbox(*, code: str, sandbox_root: Path, timeout_sec: 
     if len(chunks) == 1:
         chunks.append("No output")
     return "\n\n".join(chunks)
+
+
+def _looks_like_python_source(command: str) -> bool:
+    snippet = (command or "").lstrip()
+    if not snippet:
+        return False
+    if snippet.startswith(("python ", "python3 ", "uv run ", "bash ", "sh ", "zsh ")):
+        return False
+    indicators = (
+        "\n",
+        "import ",
+        "from ",
+        "print(",
+        "def ",
+        "class ",
+        "for ",
+        "while ",
+        "if ",
+        " = ",
+    )
+    return any(token in snippet for token in indicators)
 
 
 def _sandbox_env(sandbox_root: Path) -> dict[str, str]:
