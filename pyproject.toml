@@ -20,6 +20,9 @@ dependencies = [
     "lark-oapi>=1.4.20,<2.0.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
+    "httpx>=0.28.0,<1.0.0",
+    "ddgs>=9.5.5,<10.0.0",
+    "readability-lxml>=0.8.4,<1.0.0",
 ]
 
 [tool.setuptools.packages.find]

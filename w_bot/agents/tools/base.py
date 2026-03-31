@@ -44,6 +44,17 @@ class Tool(ABC):
     async def execute(self, **kwargs: Any) -> Any:
         pass
 
+    async def ainvoke(self, params: dict[str, Any] | None = None) -> Any:
+        arguments = params if isinstance(params, dict) else {}
+        normalized = self.cast_params(arguments)
+        errors = self.validate_params(normalized)
+        if errors:
+            return "Invalid parameters: " + "; ".join(errors)
+        return await self.execute(**normalized)
+
+    def invoke(self, params: dict[str, Any] | None = None) -> Any:
+        return asyncio.run(self.ainvoke(params))
+
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
         schema = self.parameters or {}
         if schema.get("type", "object") != "object":

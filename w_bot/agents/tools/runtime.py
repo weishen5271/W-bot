@@ -5,12 +5,15 @@ from typing import Any
 
 from ..logging_config import get_logger
 from ..memory import LongTermMemoryStore
-from .cron_tool import build_cron_tool
-from .exec_tool import build_exec_tool
-from .filesystem_tools import build_filesystem_tools
-from .mcp_tools import build_mcp_tools
-from .task_tools import build_task_tools
-from .web_tools import build_web_tools
+from .base import Tool
+from .cron import CronTool
+from .filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from .mcp import build_mcp_tools
+from .message import MessageTool
+from .registry import ToolRegistry
+from .shell import ExecTool
+from .spawn import SpawnTool
+from .web import WebFetchTool, WebSearchTool
 
 logger = get_logger(__name__)
 
@@ -23,11 +26,10 @@ def build_tools(
     enable_cron_service: bool,
     mcp_servers: list[dict[str, Any]] | None,
     extra_readonly_dirs: list[str] | None = None,
-) -> list[Any]:
+) -> list[Tool]:
     logger.info("Building tools for user_id=%s", user_id)
     _ = memory_store
     workspace_root = Path.cwd().resolve()
-    sandbox_root = workspace_root / ".sandbox"
     readonly_roots = [workspace_root]
     for candidate in extra_readonly_dirs or []:
         try:
@@ -35,15 +37,32 @@ def build_tools(
         except OSError:
             logger.warning("Skip invalid readonly root: %s", candidate)
 
-    tools: list[Any] = []
-    tools.extend(build_filesystem_tools(workspace_root=workspace_root, readonly_roots=readonly_roots))
-    tools.extend(build_web_tools(tavily_api_key=tavily_api_key))
-    tools.extend(build_task_tools(workspace_root=workspace_root))
-    tools.append(build_exec_tool(workspace_root=workspace_root, sandbox_root=sandbox_root))
+    registry = ToolRegistry()
+    registry.register(
+        ReadFileTool(
+            workspace=workspace_root,
+            allowed_dir=workspace_root,
+            extra_allowed_dirs=readonly_roots[1:],
+        )
+    )
+    registry.register(WriteFileTool(workspace=workspace_root, allowed_dir=workspace_root))
+    registry.register(EditFileTool(workspace=workspace_root, allowed_dir=workspace_root))
+    registry.register(ListDirTool(workspace=workspace_root, allowed_dir=workspace_root))
+    registry.register(WebSearchTool(provider="tavily" if tavily_api_key else "duckduckgo", api_key=tavily_api_key))
+    registry.register(WebFetchTool())
+    registry.register(MessageTool(workspace_root))
+    registry.register(SpawnTool(workspace_root))
+    registry.register(
+        ExecTool(
+            working_dir=str(workspace_root),
+            restrict_to_workspace=True,
+        )
+    )
 
     if enable_cron_service:
-        tools.append(build_cron_tool(workspace_root=workspace_root))
+        registry.register(CronTool(workspace_root))
 
-    tools.extend(build_mcp_tools(mcp_servers or []))
-    logger.info("Registered tools: %s", [getattr(t, "name", str(t)) for t in tools])
-    return tools
+    for tool in build_mcp_tools(mcp_servers or []):
+        registry.register(tool)
+    logger.info("Registered tools: %s", registry.tool_names)
+    return registry.tools
