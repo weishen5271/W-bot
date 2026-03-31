@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,22 +41,11 @@ class SkillsLoader:
         workspace_skills_dir: str = "skills",
         builtin_skills_dir: str | None = None,
     ) -> None:
-        """初始化对象并保存运行所需依赖。
-        
-        Args:
-            workspace_skills_dir: 工作区技能目录路径。
-            builtin_skills_dir: 内置技能目录路径。
-        """
         self.workspace_skills_dir = _resolve_to_abs(Path(workspace_skills_dir))
         self.builtin_skills_dir = _resolve_to_abs(Path(builtin_skills_dir)) if builtin_skills_dir else BUILTIN_SKILLS_DIR
         self.workspace_skills_dir.mkdir(parents=True, exist_ok=True)
 
     def list_skills(self, *, filter_unavailable: bool = False) -> list[SkillSpec]:
-        """处理list/skills相关逻辑并返回结果。
-        
-        Args:
-            filter_unavailable: 是否过滤不可用技能。
-        """
         merged: dict[str, SkillSpec] = {}
         for item in self._scan_dir(self.builtin_skills_dir, source="builtin"):
             merged[item.name] = item
@@ -68,8 +58,6 @@ class SkillsLoader:
         return [skill for skill in ordered if self.check_requirements(skill).available]
 
     def get_always_skills(self) -> list[SkillSpec]:
-        """处理get/always/skills相关逻辑并返回结果。
-        """
         always_skills: list[SkillSpec] = []
         for skill in self.list_skills(filter_unavailable=False):
             check = self.check_requirements(skill)
@@ -77,37 +65,48 @@ class SkillsLoader:
                 always_skills.append(skill)
         return always_skills
 
+    def load_skill(self, name: str) -> str | None:
+        for skill in self.list_skills(filter_unavailable=False):
+            if skill.name == name:
+                return skill.path.read_text(encoding="utf-8")
+        return None
+
+    def load_skills_for_context(self, skill_names: list[str]) -> str:
+        parts: list[str] = []
+        for name in skill_names:
+            content = self.load_skill(name)
+            if not content:
+                continue
+            stripped = _strip_frontmatter(content)
+            if stripped:
+                parts.append(f"### Skill: {name}\n\n{stripped}")
+        return "\n\n---\n\n".join(parts)
+
     def build_skills_summary(self) -> str:
-        """构建并返回目标对象。
-        """
         skills = self.list_skills(filter_unavailable=False)
         if not skills:
-            return "<skills>\n(no skills found)\n</skills>"
+            return ""
 
         lines = ["<skills>"]
         for skill in skills:
             check = self.check_requirements(skill)
-            line = (
-                f"- {skill.name}: {skill.description or '(no description)'}; "
-                f"source={skill.source}; available={'true' if check.available else 'false'}"
-            )
+            lines.append(f'  <skill available="{"true" if check.available else "false"}">')
+            lines.append(f"    <name>{_escape_xml(skill.name)}</name>")
+            lines.append(f"    <description>{_escape_xml(skill.description or skill.name)}</description>")
+            lines.append(f"    <location>{_escape_xml(str(skill.path))}</location>")
             if not check.available:
                 missing: list[str] = []
                 if check.missing_bins:
-                    missing.append(f"missing_bins={','.join(check.missing_bins)}")
+                    missing.extend(f"CLI: {bin_name}" for bin_name in check.missing_bins)
                 if check.missing_env:
-                    missing.append(f"missing_env={','.join(check.missing_env)}")
-                line += f"; requires={'/'.join(missing)}"
-            lines.append(line)
+                    missing.extend(f"ENV: {env_name}" for env_name in check.missing_env)
+                if missing:
+                    lines.append(f"    <requires>{_escape_xml(', '.join(missing))}</requires>")
+            lines.append("  </skill>")
         lines.append("</skills>")
         return "\n".join(lines)
 
     def check_requirements(self, skill: SkillSpec) -> SkillRequirementCheck:
-        """检查条件并返回判断结果。
-        
-        Args:
-            skill: 技能对象。
-        """
         missing_bins = tuple(bin_name for bin_name in skill.requires_bins if shutil.which(bin_name) is None)
         missing_env = tuple(env_name for env_name in skill.requires_env if not os.getenv(env_name))
         available = not missing_bins and not missing_env
@@ -118,12 +117,6 @@ class SkillsLoader:
         )
 
     def _scan_dir(self, skills_dir: Path, *, source: str) -> list[SkillSpec]:
-        """处理scan/dir相关逻辑并返回结果。
-        
-        Args:
-            skills_dir: 技能目录路径。
-            source: 来源文本或来源标识。
-        """
         if not skills_dir.exists() or not skills_dir.is_dir():
             return []
 
@@ -140,13 +133,6 @@ class SkillsLoader:
         return discovered
 
     def _parse_skill_file(self, *, skill_file: Path, fallback_name: str, source: str) -> SkillSpec | None:
-        """解析输入并返回结构化结果。
-        
-        Args:
-            skill_file: 技能文件路径。
-            fallback_name: 名称参数，用于标识目标对象。
-            source: 来源文本或来源标识。
-        """
         try:
             raw = skill_file.read_text(encoding="utf-8")
         except OSError:
@@ -176,11 +162,6 @@ class SkillsLoader:
 
 
 def _parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
-    """解析输入并返回结构化结果。
-    
-    Args:
-        raw: 原始输入内容。
-    """
     lines = raw.splitlines()
     if len(lines) < 3 or lines[0].strip() != "---":
         return {}, raw
@@ -205,11 +186,6 @@ def _parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
 
 def _parse_scalar(raw: str) -> Any:
-    """解析输入并返回结构化结果。
-    
-    Args:
-        raw: 原始输入内容。
-    """
     if not raw:
         return ""
     if raw.startswith(("'", '"')) and raw.endswith(("'", '"')) and len(raw) >= 2:
@@ -221,11 +197,6 @@ def _parse_scalar(raw: str) -> Any:
 
 
 def _parse_metadata(value: Any) -> dict[str, Any]:
-    """解析输入并返回结构化结果。
-    
-    Args:
-        value: 待转换或校验的值。
-    """
     if isinstance(value, dict):
         return value
     if isinstance(value, str) and value.strip():
@@ -252,11 +223,6 @@ def _parse_metadata(value: Any) -> dict[str, Any]:
 
 
 def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
-    """处理coerce/str/tuple相关逻辑并返回结果。
-    
-    Args:
-        value: 待转换或校验的值。
-    """
     if not isinstance(value, list):
         return ()
     result = [str(item).strip() for item in value if str(item).strip()]
@@ -264,11 +230,6 @@ def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
 
 
 def _coerce_bool(value: Any) -> bool:
-    """处理coerce/bool相关逻辑并返回结果。
-    
-    Args:
-        value: 待转换或校验的值。
-    """
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -277,9 +238,16 @@ def _coerce_bool(value: Any) -> bool:
 
 
 def _resolve_to_abs(path: Path) -> Path:
-    """处理resolve/to/abs相关逻辑并返回结果。
-    
-    Args:
-        path: 文件路径。
-    """
     return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
+
+
+def _strip_frontmatter(content: str) -> str:
+    if content.startswith("---"):
+        match = re.match(r"^---\n.*?\n---\n?", content, re.DOTALL)
+        if match:
+            return content[match.end():].strip()
+    return content.strip()
+
+
+def _escape_xml(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

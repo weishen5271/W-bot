@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import platform
 import sys
+import time
 from collections import defaultdict
+import threading
 from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -12,8 +15,6 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-
 from .config import MultimodalSettings, TokenOptimizationSettings
 from .context import ContextBuilder
 from .logging_config import get_logger
@@ -59,6 +60,34 @@ class AgentState(TypedDict):
     conversation_summary: str
     summarized_message_count: int
     prepared_system_prompt_base: str
+
+
+class ScheduledGraphApp:
+    def __init__(self, graph: Any, owner: "WBotGraph") -> None:
+        self._graph = graph
+        self._owner = owner
+
+    def invoke(self, inputs: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+        result = self._graph.invoke(inputs, config=config, **kwargs)
+        self._owner.schedule_deferred_summary(config)
+        return result
+
+    async def ainvoke(self, inputs: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+        result = await self._graph.ainvoke(inputs, config=config, **kwargs)
+        self._owner.schedule_deferred_summary(config)
+        return result
+
+    def get_state(self, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+        return self._graph.get_state(config, **kwargs)
+
+    async def aget_state(self, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+        aget_state = getattr(self._graph, "aget_state", None)
+        if callable(aget_state):
+            return await aget_state(config, **kwargs)
+        return await asyncio.to_thread(self._graph.get_state, config, **kwargs)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._graph, item)
 
 
 class WBotGraph:
@@ -108,9 +137,9 @@ class WBotGraph:
             retrieve_top_k,
         )
         self._llm_plain = llm
-        self._llm_text = llm.bind_tools(tools)
-        self._llm_image = llm_image.bind_tools(tools) if llm_image is not None else None
-        self._llm_audio = llm_audio.bind_tools(tools) if llm_audio is not None else None
+        self._llm_text_base = llm
+        self._llm_image_base = llm_image
+        self._llm_audio_base = llm_audio
         self._memory_store = memory_store
         self._retrieve_top_k = retrieve_top_k
         self._user_id = user_id
@@ -134,12 +163,22 @@ class WBotGraph:
         )
         self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
         self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
+        self._max_exec_calls_per_turn = 2
+        self._tools_by_name = {
+            str(getattr(tool, "name", "")).strip(): tool
+            for tool in tools
+            if str(getattr(tool, "name", "")).strip()
+        }
+        self._llm_tool_cache: dict[tuple[str, tuple[str, ...]], Any] = {}
+        self._deferred_summary_lock = threading.Lock()
+        self._deferred_summary_threads: dict[str, threading.Thread] = {}
+        self._deferred_summary_rerun: dict[str, bool] = {}
 
         graph_builder = StateGraph(AgentState)
         graph_builder.add_node("retrieve_memories", self._retrieve_memories)
         graph_builder.add_node("prepare_prompt_context", self._prepare_prompt_context)
         graph_builder.add_node("agent", self._agent)
-        graph_builder.add_node("action", ToolNode(tools))
+        graph_builder.add_node("action", self._action)
 
         graph_builder.add_edge(START, "retrieve_memories")
         graph_builder.add_edge("retrieve_memories", "prepare_prompt_context")
@@ -154,7 +193,8 @@ class WBotGraph:
         )
         graph_builder.add_edge("action", "agent")
 
-        self.app = graph_builder.compile(checkpointer=checkpointer)
+        self._graph = graph_builder.compile(checkpointer=checkpointer)
+        self.app = ScheduledGraphApp(self._graph, self)
         logger.info("LangGraph compiled successfully")
 
     def _retrieve_memories(
@@ -208,7 +248,6 @@ class WBotGraph:
             state: Agent 当前状态字典。
             _: 占位参数，不参与业务逻辑。
         """
-        system_prompt = _base_system_prompt()
         memory_context = state.get("long_term_context") or "无"
         history = state.get("messages", [])
         sanitized_history = sanitize_messages_for_llm(history)
@@ -245,8 +284,15 @@ class WBotGraph:
             ),
         ]
         logger.debug("Invoking LLM with %s messages", len(messages))
-        llm, selected_route = self._llm_for_current_turn(optimized["recent_messages"], messages=messages)
-        logger.info("Model routing selected route=%s", selected_route)
+        llm, selected_route, selected_tools = self._llm_for_current_turn(
+            optimized["recent_messages"],
+            messages=messages,
+        )
+        logger.info(
+            "Model routing selected route=%s tools=%s",
+            selected_route,
+            ",".join(selected_tools) or "-",
+        )
         _emit_status(config, f"已选择模型路由：{selected_route}。")
         _emit_status(config, "正在生成回复...")
         token_callback = _resolve_stream_token_callback(config) or _get_runtime_token_callback()
@@ -271,7 +317,7 @@ class WBotGraph:
                 )
                 try:
                     response = _invoke_llm_with_optional_stream(
-                        llm=self._llm_text,
+                        llm=self._bind_tools_for_route("text", selected_tools),
                         messages=fallback_messages,
                         token_callback=token_callback,
                         debug_callback=debug_callback,
@@ -289,7 +335,7 @@ class WBotGraph:
                 _emit_status(config, f"{selected_route} 模型调用失败，正在回退到 text 模型重试。")
                 try:
                     response = _invoke_llm_with_optional_stream(
-                        llm=self._llm_text,
+                        llm=self._bind_tools_for_route("text", selected_tools),
                         messages=messages,
                         token_callback=token_callback,
                         debug_callback=debug_callback,
@@ -323,23 +369,38 @@ class WBotGraph:
                     )
                 )
             else:
-                signature, repeat_count = _same_tool_call_streak(projected_history)
-                if repeat_count >= self._max_same_tool_call_repeats:
+                exec_calls = _count_named_tool_calls_since_last_human(projected_history, "exec")
+                if exec_calls > self._max_exec_calls_per_turn:
                     logger.warning(
-                        "Tool loop guard triggered: repeated_call=%s, repeat_count=%s",
-                        signature,
-                        repeat_count,
-                    )
-                    _emit_status(
-                        config,
-                        f"检测到重复工具调用（连续 {repeat_count} 次），本轮停止继续调用。",
+                        "Tool loop guard triggered: exec_calls=%s, max_exec_calls_per_turn=%s",
+                        exec_calls,
+                        self._max_exec_calls_per_turn,
                     )
                     response = AIMessage(
                         content=(
-                            f"检测到同一工具调用连续重复 {repeat_count} 次。"
-                            "我已停止自动重试，建议调整输入条件或改用其它策略后再继续。"
+                            "I have already used the exec tool multiple times in this turn. "
+                            "To avoid a slow tool loop, I am stopping here. "
+                            "If you want to continue, please specify the next command or goal more precisely."
                         )
                     )
+                else:
+                    signature, repeat_count = _same_tool_call_streak(projected_history)
+                    if repeat_count >= self._max_same_tool_call_repeats:
+                        logger.warning(
+                            "Tool loop guard triggered: repeated_call=%s, repeat_count=%s",
+                            signature,
+                            repeat_count,
+                        )
+                        _emit_status(
+                            config,
+                        f"检测到重复工具调用（连续 {repeat_count} 次），本轮停止继续调用。",
+                        )
+                        response = AIMessage(
+                            content=(
+                            f"检测到同一工具调用连续重复 {repeat_count} 次。"
+                            "我已停止自动重试，建议调整输入条件或改用其它策略后再继续。"
+                            )
+                        )
 
         if response.tool_calls:
             _emit_status(config, f"准备执行工具调用：{_summarize_tool_calls(response.tool_calls)}")
@@ -357,9 +418,72 @@ class WBotGraph:
         config: RunnableConfig | None = None,
     ) -> dict[str, str]:
         """预先构建当前回合内可复用的系统提示词固定部分。"""
-        system_prompt = _base_system_prompt()
         _emit_status(config, "正在准备回合级提示词上下文...")
         return {"prepared_system_prompt_base": self._prepared_system_prompt_base}
+
+    def _action(
+        self,
+        state: AgentState,
+        config: RunnableConfig | None = None,
+    ) -> dict[str, list[ToolMessage]]:
+        return asyncio.run(self._action_async(state, config))
+
+    async def _action_async(
+        self,
+        state: AgentState,
+        config: RunnableConfig | None = None,
+    ) -> dict[str, list[ToolMessage]]:
+        messages = state.get("messages", [])
+        if not messages:
+            return {"messages": []}
+        last = messages[-1]
+        if not isinstance(last, AIMessage) or not last.tool_calls:
+            return {"messages": []}
+
+        async def _execute_tool(index: int, tool_call: dict[str, Any]) -> ToolMessage:
+            name = str(tool_call.get("name") or "").strip()
+            tool_call_id = str(tool_call.get("id") or f"tool_call_{index}")
+            tool = self._tools_by_name.get(name)
+            if tool is None:
+                return ToolMessage(content=f"Tool not found: {name}", tool_call_id=tool_call_id, name=name)
+
+            args = tool_call.get("args")
+            if args is None:
+                args = tool_call.get("arguments")
+            if not isinstance(args, dict):
+                args = {}
+            try:
+                if hasattr(tool, "ainvoke") and callable(tool.ainvoke):
+                    raw_result = await tool.ainvoke(args)
+                elif hasattr(tool, "invoke") and callable(tool.invoke):
+                    raw_result = await asyncio.to_thread(tool.invoke, args)
+                else:
+                    raw_result = await asyncio.to_thread(tool, **args)
+                content = _tool_result_to_text(raw_result)
+            except Exception as exc:
+                logger.exception("Tool execution failed: %s", name)
+                content = f"Tool execution failed: {type(exc).__name__}: {exc}"
+            return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
+
+        _emit_status(config, f"工具并发执行中：{_summarize_tool_calls(last.tool_calls)}")
+        results = await asyncio.gather(
+            *(_execute_tool(index, tool_call) for index, tool_call in enumerate(last.tool_calls)),
+            return_exceptions=True,
+        )
+        tool_messages: list[ToolMessage] = []
+        for index, result in enumerate(results):
+            if isinstance(result, BaseException):
+                logger.exception("Concurrent tool execution failed", exc_info=result)
+                tool_messages.append(
+                    ToolMessage(
+                        content=f"Tool execution failed: {type(result).__name__}: {result}",
+                        tool_call_id=f"tool_call_{index}",
+                        name="tool_error",
+                    )
+                )
+                continue
+            tool_messages.append(result)
+        return {"messages": tool_messages}
 
     @staticmethod
     def _route_after_agent(state: AgentState) -> str:
@@ -384,7 +508,7 @@ class WBotGraph:
         history: list[AnyMessage],
         *,
         messages: list[AnyMessage],
-    ) -> tuple[Any, str]:
+    ) -> tuple[Any, str, tuple[str, ...]]:
         """处理llm/for/current/turn相关逻辑并返回结果。
         
         Args:
@@ -393,11 +517,70 @@ class WBotGraph:
         """
         route = _route_for_history(history)
         has_native_image = _has_native_image_blocks(messages)
-        if route == "image" and has_native_image and self._llm_image is not None:
-            return self._llm_image, "image"
-        if route == "audio" and self._llm_audio is not None:
-            return self._llm_audio, "audio"
-        return self._llm_text, "text"
+        tool_names = self._select_tool_names_for_current_turn(history, messages=messages)
+        if route == "image" and has_native_image and self._llm_image_base is not None:
+            return self._llm_for_route_with_tools("image", tool_names), "image", tool_names
+        if route == "audio" and self._llm_audio_base is not None:
+            return self._llm_for_route_with_tools("audio", tool_names), "audio", tool_names
+        return self._llm_for_route_with_tools("text", tool_names), "text", tool_names
+
+    def _llm_for_route_with_tools(self, route: str, tool_names: tuple[str, ...]) -> Any:
+        if not tool_names:
+            if route == "image" and self._llm_image_base is not None:
+                return self._llm_image_base
+            if route == "audio" and self._llm_audio_base is not None:
+                return self._llm_audio_base
+            return self._llm_plain
+        return self._bind_tools_for_route(route, tool_names)
+
+    def _bind_tools_for_route(self, route: str, tool_names: tuple[str, ...]) -> Any:
+        cache_key = (route, tool_names)
+        cached = self._llm_tool_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        base_llm = self._llm_text_base
+        if route == "image" and self._llm_image_base is not None:
+            base_llm = self._llm_image_base
+        elif route == "audio" and self._llm_audio_base is not None:
+            base_llm = self._llm_audio_base
+
+        selected_tools = [self._tools_by_name[name] for name in tool_names if name in self._tools_by_name]
+        if not selected_tools:
+            return base_llm
+
+        bound = base_llm.bind_tools(selected_tools)
+        self._llm_tool_cache[cache_key] = bound
+        return bound
+
+    def _select_tool_names_for_current_turn(
+        self,
+        history: list[AnyMessage],
+        *,
+        messages: list[AnyMessage],
+    ) -> tuple[str, ...]:
+        user_text = _extract_last_user_message(history).lower()
+        if _looks_like_casual_chat(user_text):
+            return ()
+
+        selected: set[str] = {"read_file", "list_dir"}
+        available = set(self._tools_by_name)
+        if _looks_like_file_edit_request(user_text):
+            selected.update({"read_file", "list_dir", "modify_file"})
+        if _looks_like_web_request(user_text):
+            selected.update({"web_search", "web_fetch"})
+        if _looks_like_message_request(user_text):
+            selected.add("message")
+        if _looks_like_spawn_request(user_text):
+            selected.add("spawn")
+        if _looks_like_cron_request(user_text):
+            selected.add("cron")
+        if _looks_like_exec_request(user_text):
+            selected.update({"read_file", "list_dir", "exec"})
+        if _has_native_image_blocks(messages):
+            selected.update({"read_file", "list_dir"})
+
+        return tuple(sorted(name for name in selected if name in available))
 
     def _normalizer_for_current_turn(self, history: list[AnyMessage]) -> MultimodalNormalizer | None:
         """将输入标准化为统一结构。
@@ -532,6 +715,84 @@ class WBotGraph:
         if len(text) <= max_chars:
             return text
         return text[:max_chars].rstrip()
+
+    def schedule_deferred_summary(self, config: RunnableConfig | None) -> None:
+        if not _should_defer_summary_update(config):
+            return
+        thread_id = _resolve_thread_id(config)
+        if thread_id == "-":
+            return
+        with self._deferred_summary_lock:
+            worker = self._deferred_summary_threads.get(thread_id)
+            if worker is not None and worker.is_alive():
+                self._deferred_summary_rerun[thread_id] = True
+                return
+            self._deferred_summary_rerun[thread_id] = False
+            worker = threading.Thread(
+                target=self._run_deferred_summary_worker,
+                args=(thread_id,),
+                name=f"summary-{thread_id}",
+                daemon=True,
+            )
+            self._deferred_summary_threads[thread_id] = worker
+            worker.start()
+
+    def _run_deferred_summary_worker(self, thread_id: str) -> None:
+        while True:
+            try:
+                self._refresh_summary_for_thread(thread_id)
+            except Exception:
+                logger.exception("Deferred summary refresh failed: thread_id=%s", thread_id)
+
+            with self._deferred_summary_lock:
+                should_rerun = self._deferred_summary_rerun.get(thread_id, False)
+                if should_rerun:
+                    self._deferred_summary_rerun[thread_id] = False
+                    continue
+                self._deferred_summary_threads.pop(thread_id, None)
+                self._deferred_summary_rerun.pop(thread_id, None)
+                break
+
+    def _refresh_summary_for_thread(self, thread_id: str) -> None:
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        snapshot = self._graph.get_state(config)
+        values = getattr(snapshot, "values", None) or {}
+        messages = values.get("messages", [])
+        if not isinstance(messages, list) or not messages:
+            return
+
+        state: AgentState = {
+            "messages": messages,
+            "long_term_context": str(values.get("long_term_context") or ""),
+            "conversation_summary": str(values.get("conversation_summary") or ""),
+            "summarized_message_count": int(values.get("summarized_message_count") or 0),
+            "prepared_system_prompt_base": str(
+                values.get("prepared_system_prompt_base") or self._prepared_system_prompt_base
+            ),
+        }
+        optimized = self._prepare_optimized_context(state=state, history=sanitize_messages_for_llm(messages), config=None)
+        if (
+            optimized["conversation_summary"] == state["conversation_summary"]
+            and optimized["summarized_message_count"] == state["summarized_message_count"]
+        ):
+            return
+
+        update_state = getattr(self._graph, "update_state", None)
+        if not callable(update_state):
+            logger.warning("Compiled graph does not support update_state; skip deferred summary refresh")
+            return
+        update_state(
+            config,
+            {
+                "conversation_summary": optimized["conversation_summary"],
+                "summarized_message_count": optimized["summarized_message_count"],
+            },
+        )
+        logger.info(
+            "Deferred summary refreshed: thread_id=%s summarized_message_count=%s",
+            thread_id,
+            optimized["summarized_message_count"],
+        )
 
 
 def _extract_last_user_message(messages: list[AnyMessage]) -> str:
@@ -950,14 +1211,36 @@ def _invoke_openai_compatible_direct_stream(
     if root_client is None or not callable(build_payload):
         return None
 
+    setup_started_at = time.perf_counter()
     try:
+        payload_started_at = time.perf_counter()
         payload = build_payload(messages, **binding_kwargs)
+        payload_ready_at = time.perf_counter()
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
+        request_started_at = time.perf_counter()
         stream = root_client.chat.completions.create(**payload)
+        request_ready_at = time.perf_counter()
     except Exception:
         logger.debug("Direct OpenAI-compatible stream setup failed", exc_info=True)
         return None
+
+    message_count = len(messages)
+    tool_count = len(payload.get("tools") or []) if isinstance(payload, dict) else 0
+    payload_bytes = 0
+    try:
+        payload_bytes = len(json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        logger.debug("Failed to estimate direct stream payload size", exc_info=True)
+    logger.info(
+        "Direct stream setup timing: messages=%s tools=%s payload_bytes=%s build_payload_ms=%.1f create_stream_ms=%.1f total_setup_ms=%.1f",
+        message_count,
+        tool_count,
+        payload_bytes,
+        (payload_ready_at - payload_started_at) * 1000,
+        (request_ready_at - request_started_at) * 1000,
+        (request_ready_at - setup_started_at) * 1000,
+    )
 
     if debug_callback is not None:
         debug_callback("completion_start_direct")
@@ -967,9 +1250,17 @@ def _invoke_openai_compatible_direct_stream(
     emitted_any = False
     chunk_count = 0
     text_chunk_count = 0
+    first_chunk_at: float | None = None
+    first_text_at: float | None = None
     try:
         for chunk in stream:
             chunk_count += 1
+            if first_chunk_at is None:
+                first_chunk_at = time.perf_counter()
+                logger.info(
+                    "Direct stream first chunk latency: %.1f ms",
+                    (first_chunk_at - request_started_at) * 1000,
+                )
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -979,6 +1270,12 @@ def _invoke_openai_compatible_direct_stream(
                 continue
             text = getattr(delta, "content", None)
             if isinstance(text, str) and text:
+                if first_text_at is None:
+                    first_text_at = time.perf_counter()
+                    logger.info(
+                        "Direct stream first text latency: %.1f ms",
+                        (first_text_at - request_started_at) * 1000,
+                    )
                 token_callback(text)
                 content_parts.append(text)
                 text_chunk_count += 1
@@ -1030,11 +1327,13 @@ def _invoke_openai_compatible_direct_stream(
             f"completion_end_direct chunks={chunk_count} chunks_with_text={text_chunk_count} emitted_any={emitted_any}"
         )
     logger.info(
-        "Direct OpenAI-compatible stream stats: chunks=%s, chunks_with_text=%s, emitted_any=%s, tool_calls=%s",
+        "Direct OpenAI-compatible stream stats: chunks=%s, chunks_with_text=%s, emitted_any=%s, tool_calls=%s, first_chunk_ms=%s, first_text_ms=%s",
         chunk_count,
         text_chunk_count,
         emitted_any,
         len(tool_calls),
+        f"{(first_chunk_at - request_started_at) * 1000:.1f}" if first_chunk_at is not None else "-",
+        f"{(first_text_at - request_started_at) * 1000:.1f}" if first_text_at is not None else "-",
     )
     return AIMessage(content="".join(content_parts), tool_calls=tool_calls)
 
@@ -1139,6 +1438,22 @@ def _count_tool_steps_since_last_human(messages: list[AnyMessage]) -> int:
     return count
 
 
+def _count_named_tool_calls_since_last_human(messages: list[AnyMessage], tool_name: str) -> int:
+    count = 0
+    target = (tool_name or "").strip().lower()
+    if not target:
+        return 0
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+        for tool_call in message.tool_calls:
+            if str(tool_call.get("name") or "").strip().lower() == target:
+                count += 1
+    return count
+
+
 def _same_tool_call_streak(messages: list[AnyMessage]) -> tuple[str, int]:
     signatures: list[str] = []
     for message in reversed(messages):
@@ -1180,6 +1495,184 @@ def _tool_call_signature(tool_calls: list[dict[str, Any]]) -> str:
             args_text = str(args)
         normalized.append(f"{name}:{args_text}")
     return "|".join(normalized)
+
+
+def _should_enable_tools_for_text(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    if _looks_like_casual_chat(lowered):
+        return False
+    if _looks_like_exec_request(lowered):
+        return True
+    if _looks_like_web_request(lowered):
+        return True
+    if _looks_like_file_edit_request(lowered):
+        return True
+    if _looks_like_file_read_request(lowered):
+        return True
+    if _looks_like_project_inspection_request(lowered):
+        return True
+    if _looks_like_spawn_request(lowered) or _looks_like_message_request(lowered) or _looks_like_cron_request(lowered):
+        return True
+    return True
+
+
+def _looks_like_casual_chat(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return True
+    short_smalltalk = {
+        "你好",
+        "hello",
+        "hi",
+        "hey",
+        "谢谢",
+        "thanks",
+        "thank you",
+        "早上好",
+        "晚上好",
+        "在吗",
+        "bye",
+        "再见",
+    }
+    if lowered in short_smalltalk:
+        return True
+    if len(lowered) <= 12 and any(token in lowered for token in ("你好", "hello", "hi", "thanks", "谢谢")):
+        return True
+    return False
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _looks_like_project_inspection_request(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "当前项目",
+            "这个项目",
+            "仓库",
+            "代码库",
+            "langgraph",
+            "流程",
+            "实现",
+            "源码",
+            "agent.py",
+            "函数",
+            "方法",
+            "模块",
+            "why is",
+            "why does",
+            "project",
+            "codebase",
+            "workflow",
+            "implementation",
+        ),
+    )
+
+
+def _looks_like_file_read_request(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "读取",
+            "查看",
+            "分析文件",
+            "看下",
+            "目录",
+            "文件",
+            "read ",
+            "open ",
+            "inspect",
+            "list ",
+            ".py",
+            ".md",
+            ".json",
+        ),
+    )
+
+
+def _looks_like_file_edit_request(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "修改",
+            "删除",
+            "新增",
+            "重构",
+            "修复",
+            "patch",
+            "edit",
+            "update",
+            "rewrite",
+            "change",
+        ),
+    )
+
+
+def _looks_like_web_request(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "搜索",
+            "联网",
+            "网页",
+            "网站",
+            "最新",
+            "web",
+            "search",
+            "fetch",
+            "browse",
+            "internet",
+            "online",
+        ),
+    )
+
+
+def _looks_like_exec_request(text: str) -> bool:
+    return _contains_any(
+        text,
+        (
+            "执行",
+            "运行",
+            "命令",
+            "终端",
+            "shell",
+            "powershell",
+            "bash",
+            "cmd",
+            "python ",
+            "exec",
+            "run ",
+            "command",
+            "terminal",
+        ),
+    )
+
+
+def _looks_like_spawn_request(text: str) -> bool:
+    return _contains_any(text, ("spawn", "子 agent", "子agent", "后台任务", "并行"))
+
+
+def _looks_like_message_request(text: str) -> bool:
+    return _contains_any(text, ("发送消息", "通知", "message ", "send message"))
+
+
+def _looks_like_cron_request(text: str) -> bool:
+    return _contains_any(text, ("cron", "定时", "schedule", "scheduled"))
+
+
+def _tool_result_to_text(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (int, float, bool)) or result is None:
+        return str(result)
+    try:
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return str(result)
 
 
 def _build_text_only_retry_messages(
