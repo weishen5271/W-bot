@@ -24,6 +24,7 @@ from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.skills import SkillsLoader
+from w_bot.agents.streaming import StreamTextAssembler
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
 
@@ -268,14 +269,13 @@ def _build_app(
                 loop.call_soon_threadsafe(event_queue.put_nowait, (event_name, payload))
 
             def worker() -> None:
-                emitted_text = ""
+                stream_assembler = StreamTextAssembler()
                 token_event_count = 0
                 stream_id = 1
                 token_buffer = ""
-                token_flush_interval = 0.03
+                token_flush_interval = 0.015
                 last_token_flush_at = time.monotonic()
                 streamed_any_token = False
-                current_segment_streamed = False
                 seen_status: set[str] = set()
 
                 def flush_token_buffer(*, force: bool) -> None:
@@ -324,19 +324,14 @@ def _build_app(
 
                 def emit_token(text: str) -> None:
                     nonlocal token_buffer
-                    nonlocal emitted_text
-                    nonlocal current_segment_streamed
                     if not text:
                         return
-                    delta = text
-                    if text.startswith(emitted_text):
-                        delta = text[len(emitted_text):]
+                    delta = stream_assembler.consume(text)
                     if not delta:
                         return
-                    emitted_text += delta
-                    current_segment_streamed = True
                     token_buffer += delta
-                    flush_token_buffer(force=False)
+                    should_force_flush = ("\n" in delta) or any(mark in delta for mark in ("。", "！", "？", ".", "!", "?"))
+                    flush_token_buffer(force=should_force_flush)
 
                 def emit_status(text: str) -> None:
                     normalized = text.strip()

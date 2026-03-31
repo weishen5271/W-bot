@@ -115,6 +115,36 @@ class OpenClawProfileLoader:
             return ""
         return "\n\n".join(blocks)
 
+    def render_compact_profile_context(self) -> str:
+        """渲染轻量版档案上下文，保留核心规则并压缩次级档案。"""
+        if not self._enabled:
+            return ""
+
+        summary_lines: list[str] = []
+        for filename in PROFILE_INCLUDE_ORDER:
+            content = self._read_non_empty(filename)
+            if not content:
+                continue
+            max_chars = 220 if filename in {"IDENTITY.md", "SOUL.md", "AGENTS.md", "TOOLS.md"} else 140
+            condensed = self._condense_markdown(content, max_chars=max_chars)
+            if condensed:
+                summary_lines.append(f"- {filename}: {condensed}")
+        if summary_lines:
+            blocks = ["[PROFILE_SUMMARY]\n" + "\n".join(summary_lines)]
+        else:
+            blocks = []
+
+        bootstrap = self._startup_bootstrap_note.strip()
+        if bootstrap:
+            blocks.append(
+                "[BOOTSTRAP_CONSUMED]\n以下内容来自本次启动前的 BOOTSTRAP.md（已消费并删除）：\n"
+                f"{self._condense_markdown(bootstrap, max_chars=240)}"
+            )
+
+        if not blocks:
+            return ""
+        return "\n\n".join(blocks)
+
     def onboard(self) -> list[str]:
         """初始化工作区档案模板，只补齐缺失文件。"""
         return self._ensure_scaffold()
@@ -197,3 +227,23 @@ class OpenClawProfileLoader:
             return ""
         content = target.read_text(encoding="utf-8").strip()
         return content
+
+    @staticmethod
+    def _condense_markdown(content: str, *, max_chars: int = 320) -> str:
+        lines: list[str] = []
+        for raw in content.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                continue
+            if line.startswith(("- ", "* ")):
+                line = line[2:].strip()
+            elif len(line) > 2 and line[0].isdigit() and line[1] == ".":
+                line = line[2:].strip()
+            lines.append(line)
+
+        merged = "；".join(part for part in lines if part)
+        if len(merged) <= max_chars:
+            return merged
+        return merged[: max_chars - 1].rstrip() + "…"

@@ -21,6 +21,10 @@ from ..memory import LongTermMemoryStore
 logger = get_logger(__name__)
 
 
+def _safe_completed_text(value: str | None) -> str:
+    return (value or "").strip()
+
+
 def build_tools(
     *,
     memory_store: LongTermMemoryStore,
@@ -305,6 +309,7 @@ def _build_exec_tool(*, workspace_root: Path, sandbox_root: Path) -> StructuredT
                 cwd=str(workspace_root),
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=max(1, timeout_sec),
             )
         except subprocess.TimeoutExpired:
@@ -312,12 +317,16 @@ def _build_exec_tool(*, workspace_root: Path, sandbox_root: Path) -> StructuredT
         except Exception as exc:
             return f"Command failed: {type(exc).__name__}: {exc}"
 
-        chunks: list[str] = [
-            f"exit_code={completed.returncode}",
-            f"stdout:\n{completed.stdout.strip()}",
-            f"stderr:\n{completed.stderr.strip()}",
-        ]
-        return "\n\n".join(chunks).strip()
+        chunks: list[str] = [f"exit_code={completed.returncode}"]
+        stdout = _safe_completed_text(completed.stdout)
+        stderr = _safe_completed_text(completed.stderr)
+        if stdout:
+            chunks.append(f"stdout:\n{stdout}")
+        if stderr:
+            chunks.append(f"stderr:\n{stderr}")
+        if len(chunks) == 1:
+            chunks.append("No output")
+        return "\n\n".join(chunks)
 
     return StructuredTool.from_function(
         func=_exec,
@@ -358,6 +367,7 @@ def _run_python_in_local_sandbox(*, code: str, sandbox_root: Path, timeout_sec: 
             cwd=str(sandbox_root),
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=max(1, timeout_sec),
             env=_sandbox_env(sandbox_root),
             preexec_fn=_sandbox_preexec_fn(),
@@ -375,8 +385,8 @@ def _run_python_in_local_sandbox(*, code: str, sandbox_root: Path, timeout_sec: 
                 logger.warning("Failed to remove sandbox script: %s", script_path)
 
     chunks: list[str] = [f"exit_code={completed.returncode}"]
-    stdout = completed.stdout.strip()
-    stderr = completed.stderr.strip()
+    stdout = _safe_completed_text(completed.stdout)
+    stderr = _safe_completed_text(completed.stderr)
     if stdout:
         chunks.append(f"stdout:\n{stdout}")
     if stderr:

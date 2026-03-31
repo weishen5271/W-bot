@@ -87,18 +87,18 @@ class SkillsLoader:
         lines = ["<skills>"]
         for skill in skills:
             check = self.check_requirements(skill)
-            lines.append(f"- name: {skill.name}")
-            lines.append(f"  description: {skill.description or '(no description)'}")
-            lines.append(f"  path: {skill.path}")
-            lines.append(f"  source: {skill.source}")
-            lines.append(f"  available: {'true' if check.available else 'false'}")
+            line = (
+                f"- {skill.name}: {skill.description or '(no description)'}; "
+                f"source={skill.source}; available={'true' if check.available else 'false'}"
+            )
             if not check.available:
                 missing: list[str] = []
                 if check.missing_bins:
                     missing.append(f"missing_bins={','.join(check.missing_bins)}")
                 if check.missing_env:
                     missing.append(f"missing_env={','.join(check.missing_env)}")
-                lines.append(f"  requires: {'; '.join(missing)}")
+                line += f"; requires={'/'.join(missing)}"
+            lines.append(line)
         lines.append("</skills>")
         return "\n".join(lines)
 
