@@ -60,6 +60,10 @@ class AgentState(TypedDict):
     conversation_summary: str
     summarized_message_count: int
     prepared_system_prompt_base: str
+    last_tool_failed: bool
+    consecutive_tool_failures: int
+    last_tool_name: str
+    last_tool_error: str
 
 
 class ScheduledGraphApp:
@@ -163,6 +167,7 @@ class WBotGraph:
         )
         self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
         self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
+        self._max_consecutive_tool_failures = 2
         self._max_exec_calls_per_turn = 2
         self._tools_by_name = {
             str(getattr(tool, "name", "")).strip(): tool
@@ -179,6 +184,7 @@ class WBotGraph:
         graph_builder.add_node("prepare_prompt_context", self._prepare_prompt_context)
         graph_builder.add_node("agent", self._agent)
         graph_builder.add_node("action", self._action)
+        graph_builder.add_node("recover", self._recover_after_tool_failure)
 
         graph_builder.add_edge(START, "retrieve_memories")
         graph_builder.add_edge("retrieve_memories", "prepare_prompt_context")
@@ -191,7 +197,15 @@ class WBotGraph:
                 "end": END,
             },
         )
-        graph_builder.add_edge("action", "agent")
+        graph_builder.add_conditional_edges(
+            "action",
+            self._route_after_action,
+            {
+                "agent": "agent",
+                "recover": "recover",
+            },
+        )
+        graph_builder.add_edge("recover", END)
 
         self._graph = graph_builder.compile(checkpointer=checkpointer)
         self.app = ScheduledGraphApp(self._graph, self)
@@ -425,20 +439,32 @@ class WBotGraph:
         self,
         state: AgentState,
         config: RunnableConfig | None = None,
-    ) -> dict[str, list[ToolMessage]]:
+    ) -> dict[str, Any]:
         return asyncio.run(self._action_async(state, config))
 
     async def _action_async(
         self,
         state: AgentState,
         config: RunnableConfig | None = None,
-    ) -> dict[str, list[ToolMessage]]:
+    ) -> dict[str, Any]:
         messages = state.get("messages", [])
         if not messages:
-            return {"messages": []}
+            return {
+                "messages": [],
+                "last_tool_failed": False,
+                "consecutive_tool_failures": 0,
+                "last_tool_name": "",
+                "last_tool_error": "",
+            }
         last = messages[-1]
         if not isinstance(last, AIMessage) or not last.tool_calls:
-            return {"messages": []}
+            return {
+                "messages": [],
+                "last_tool_failed": False,
+                "consecutive_tool_failures": 0,
+                "last_tool_name": "",
+                "last_tool_error": "",
+            }
 
         async def _execute_tool(index: int, tool_call: dict[str, Any]) -> ToolMessage:
             name = str(tool_call.get("name") or "").strip()
@@ -471,9 +497,13 @@ class WBotGraph:
             return_exceptions=True,
         )
         tool_messages: list[ToolMessage] = []
+        failed_tool_names: list[str] = []
+        failed_tool_errors: list[str] = []
         for index, result in enumerate(results):
             if isinstance(result, BaseException):
                 logger.exception("Concurrent tool execution failed", exc_info=result)
+                failed_tool_names.append(f"tool_call_{index}")
+                failed_tool_errors.append(f"{type(result).__name__}: {result}")
                 tool_messages.append(
                     ToolMessage(
                         content=f"Tool execution failed: {type(result).__name__}: {result}",
@@ -482,8 +512,53 @@ class WBotGraph:
                     )
                 )
                 continue
+            if _is_tool_failure_content(result.content):
+                failed_tool_names.append(str(result.name or f"tool_call_{index}"))
+                failed_tool_errors.append(_extract_tool_failure_summary(result.content))
             tool_messages.append(result)
-        return {"messages": tool_messages}
+        last_tool_failed = bool(failed_tool_errors)
+        previous_failures = int(state.get("consecutive_tool_failures", 0) or 0)
+        consecutive_tool_failures = previous_failures + 1 if last_tool_failed else 0
+        if last_tool_failed:
+            _emit_status(
+                config,
+                f"工具执行失败（连续 {consecutive_tool_failures} 次）：{', '.join(failed_tool_names)}",
+            )
+        else:
+            _emit_status(config, "工具执行完成，继续整理结果。")
+        return {
+            "messages": tool_messages,
+            "last_tool_failed": last_tool_failed,
+            "consecutive_tool_failures": consecutive_tool_failures,
+            "last_tool_name": ", ".join(failed_tool_names[:3]),
+            "last_tool_error": " | ".join(failed_tool_errors[:3]),
+        }
+
+    def _recover_after_tool_failure(
+        self,
+        state: AgentState,
+        config: RunnableConfig | None = None,
+    ) -> dict[str, Any]:
+        consecutive_failures = int(state.get("consecutive_tool_failures", 0) or 0)
+        tool_name = str(state.get("last_tool_name") or "工具").strip()
+        detail = str(state.get("last_tool_error") or "").strip()
+        _emit_status(config, "工具连续失败，已停止自动重试并生成兜底回复。")
+        detail_suffix = f"\n最近一次错误：{detail}" if detail else ""
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"{tool_name} 连续执行失败 {consecutive_failures} 次，我已停止自动重试，避免流程卡住。"
+                        "你可以调整输入参数、补充上下文，或让我改用别的策略继续处理。"
+                        f"{detail_suffix}"
+                    )
+                )
+            ],
+            "last_tool_failed": False,
+            "consecutive_tool_failures": 0,
+            "last_tool_name": "",
+            "last_tool_error": "",
+        }
 
     @staticmethod
     def _route_after_agent(state: AgentState) -> str:
@@ -502,6 +577,17 @@ class WBotGraph:
             return "action"
         logger.debug("Route decision: no tool call -> end")
         return "end"
+
+    def _route_after_action(self, state: AgentState) -> str:
+        consecutive_failures = int(state.get("consecutive_tool_failures", 0) or 0)
+        if consecutive_failures >= self._max_consecutive_tool_failures:
+            logger.warning(
+                "Route decision after action: consecutive tool failures reached limit=%s",
+                consecutive_failures,
+            )
+            return "recover"
+        logger.debug("Route decision after action: continue agent")
+        return "agent"
 
     def _llm_for_current_turn(
         self,
@@ -563,28 +649,8 @@ class WBotGraph:
         *,
         messages: list[AnyMessage],
     ) -> tuple[str, ...]:
-        user_text = _extract_last_user_message(history).lower()
-        if _looks_like_casual_chat(user_text):
-            return ()
-
-        selected: set[str] = {"read_file", "list_dir"}
-        available = set(self._tools_by_name)
-        if _looks_like_file_edit_request(user_text):
-            selected.update({"read_file", "list_dir", "write_file", "edit_file"})
-        if _looks_like_web_request(user_text):
-            selected.update({"web_search", "web_fetch"})
-        if _looks_like_message_request(user_text):
-            selected.add("message")
-        if _looks_like_spawn_request(user_text):
-            selected.add("spawn")
-        if _looks_like_cron_request(user_text):
-            selected.add("cron")
-        if _looks_like_exec_request(user_text):
-            selected.update({"read_file", "list_dir", "exec"})
-        if _has_native_image_blocks(messages):
-            selected.update({"read_file", "list_dir"})
-
-        return tuple(sorted(name for name in selected if name in available))
+        del history, messages
+        return tuple(sorted(self._tools_by_name))
 
     def _normalizer_for_current_turn(self, history: list[AnyMessage]) -> MultimodalNormalizer | None:
         """将输入标准化为统一结构。
@@ -1051,7 +1117,7 @@ def _is_messages_length_error(exc: Exception) -> bool:
     return "messages parameter length invalid" in text
 
 
-def _resolve_stream_token_callback(config: RunnableConfig | None) -> Callable[[str], None] | None:
+def _resolve_stream_token_callback(config: RunnableConfig | None) -> Callable[[Any], None] | None:
     if config is None:
         return None
     if not hasattr(config, "get"):
@@ -1134,7 +1200,7 @@ def _invoke_llm_with_optional_stream(
     *,
     llm: Any,
     messages: list[AnyMessage],
-    token_callback: Callable[[str], None] | None,
+    token_callback: Callable[[Any], None] | None,
     debug_callback: Callable[[str], None] | None = None,
 ) -> AIMessage:
     if token_callback is None:
@@ -1155,10 +1221,28 @@ def _invoke_llm_with_optional_stream(
     chunk_count = 0
     chunk_text_count = 0
     merged_emitted_text = ""
+    merged_emitted_reasoning = ""
+    reasoning_started = False
+    answer_started = False
     emitted_any = False
     for chunk in llm.stream(messages):
         chunk_count += 1
         merged = chunk if merged is None else (merged + chunk)
+        reasoning_text = _extract_stream_chunk_reasoning(chunk)
+        if not reasoning_text:
+            merged_reasoning = _to_stream_reasoning_content(getattr(merged, "content", ""))
+            if not merged_reasoning:
+                merged_reasoning = _to_stream_reasoning_content(getattr(merged, "additional_kwargs", None))
+            if merged_reasoning and merged_reasoning.startswith(merged_emitted_reasoning):
+                reasoning_text = merged_reasoning[len(merged_emitted_reasoning):]
+                merged_emitted_reasoning = merged_reasoning
+        if reasoning_text:
+            if not reasoning_started:
+                reasoning_started = True
+            token_callback({"kind": "reasoning", "text": reasoning_text})
+            if debug_callback is not None and not emitted_any:
+                debug_callback("first_token_emitted")
+            emitted_any = True
         text = _extract_stream_chunk_text(chunk)
         if not text:
             # Nanobot-style behavior: recover incremental text from merged
@@ -1169,7 +1253,9 @@ def _invoke_llm_with_optional_stream(
                 text = merged_text[len(merged_emitted_text):]
                 merged_emitted_text = merged_text
         if text:
-            token_callback(text)
+            if reasoning_started and not answer_started:
+                answer_started = True
+            token_callback({"kind": "answer", "text": text})
             chunk_text_count += 1
             if debug_callback is not None and not emitted_any:
                 debug_callback("first_token_emitted")
@@ -1177,6 +1263,11 @@ def _invoke_llm_with_optional_stream(
         merged_text = _to_stream_text_content(getattr(merged, "content", ""))
         if merged_text and merged_text.startswith(merged_emitted_text):
             merged_emitted_text = merged_text
+        merged_reasoning = _to_stream_reasoning_content(getattr(merged, "content", ""))
+        if not merged_reasoning:
+            merged_reasoning = _to_stream_reasoning_content(getattr(merged, "additional_kwargs", None))
+        if merged_reasoning and merged_reasoning.startswith(merged_emitted_reasoning):
+            merged_emitted_reasoning = merged_reasoning
 
     if merged is None:
         return AIMessage(content="")
@@ -1185,7 +1276,7 @@ def _invoke_llm_with_optional_stream(
         # this completion call returns, instead of waiting for the full turn.
         final_text = _to_stream_text_content(getattr(merged, "content", "")).strip()
         if final_text:
-            token_callback(final_text)
+            token_callback({"kind": "answer", "text": final_text})
             if debug_callback is not None:
                 debug_callback("fallback_emit_final_text")
     if debug_callback is not None:
@@ -1205,7 +1296,7 @@ def _invoke_openai_compatible_direct_stream(
     *,
     llm: Any,
     messages: list[AnyMessage],
-    token_callback: Callable[[str], None],
+    token_callback: Callable[[Any], None],
     debug_callback: Callable[[str], None] | None = None,
 ) -> AIMessage | None:
     chat_model = getattr(llm, "bound", llm)
@@ -1256,6 +1347,8 @@ def _invoke_openai_compatible_direct_stream(
     text_chunk_count = 0
     first_chunk_at: float | None = None
     first_text_at: float | None = None
+    reasoning_started = False
+    answer_started = False
     try:
         for chunk in stream:
             chunk_count += 1
@@ -1272,6 +1365,20 @@ def _invoke_openai_compatible_direct_stream(
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
+            reasoning = _to_stream_reasoning_content(delta)
+            if reasoning:
+                if first_text_at is None:
+                    first_text_at = time.perf_counter()
+                    logger.info(
+                        "Direct stream first text latency: %.1f ms",
+                        (first_text_at - request_started_at) * 1000,
+                    )
+                if not reasoning_started:
+                    reasoning_started = True
+                token_callback({"kind": "reasoning", "text": reasoning})
+                if debug_callback is not None and not emitted_any:
+                    debug_callback("first_token_emitted_direct")
+                emitted_any = True
             text = getattr(delta, "content", None)
             if isinstance(text, str) and text:
                 if first_text_at is None:
@@ -1280,7 +1387,9 @@ def _invoke_openai_compatible_direct_stream(
                         "Direct stream first text latency: %.1f ms",
                         (first_text_at - request_started_at) * 1000,
                     )
-                token_callback(text)
+                if reasoning_started and not answer_started:
+                    answer_started = True
+                token_callback({"kind": "answer", "text": text})
                 content_parts.append(text)
                 text_chunk_count += 1
                 if debug_callback is not None and not emitted_any:
@@ -1366,6 +1475,20 @@ def _extract_stream_chunk_text(chunk: Any) -> str:
     return ""
 
 
+def _extract_stream_chunk_reasoning(chunk: Any) -> str:
+    content = getattr(chunk, "content", "")
+    reasoning = _to_stream_reasoning_content(content)
+    if reasoning:
+        return reasoning
+
+    additional = getattr(chunk, "additional_kwargs", None)
+    if additional is not None:
+        reasoning = _to_stream_reasoning_content(additional)
+        if reasoning:
+            return reasoning
+    return ""
+
+
 def _to_stream_text_content(content: Any) -> str:
     """Extract only text-like stream payload fields, avoiding metadata noise."""
     if isinstance(content, str):
@@ -1416,6 +1539,56 @@ def _to_stream_text_content(content: Any) -> str:
             if nested_text:
                 return nested_text
         return ""
+    return ""
+
+
+def _to_stream_reasoning_content(content: Any) -> str:
+    if isinstance(content, str):
+        return ""
+    if isinstance(content, list):
+        lines: list[str] = []
+        for item in content:
+            extracted = _to_stream_reasoning_content(item)
+            if extracted:
+                lines.append(extracted)
+        return "\n".join(lines)
+    if isinstance(content, dict):
+        reasoning = content.get("reasoning_content")
+        if isinstance(reasoning, str):
+            return reasoning
+        delta = content.get("delta")
+        if isinstance(delta, (dict, list)):
+            delta_reasoning = _to_stream_reasoning_content(delta)
+            if delta_reasoning:
+                return delta_reasoning
+        nested = content.get("content")
+        if nested is not None and nested is not content:
+            nested_reasoning = _to_stream_reasoning_content(nested)
+            if nested_reasoning:
+                return nested_reasoning
+        choices = content.get("choices")
+        if isinstance(choices, list):
+            lines: list[str] = []
+            for choice in choices:
+                extracted = _to_stream_reasoning_content(choice)
+                if extracted:
+                    lines.append(extracted)
+            if lines:
+                return "\n".join(lines)
+        return ""
+    reasoning = getattr(content, "reasoning_content", None)
+    if isinstance(reasoning, str):
+        return reasoning
+    delta = getattr(content, "delta", None)
+    if isinstance(delta, (dict, list)):
+        delta_reasoning = _to_stream_reasoning_content(delta)
+        if delta_reasoning:
+            return delta_reasoning
+    nested = getattr(content, "content", None)
+    if nested is not None and nested is not content:
+        nested_reasoning = _to_stream_reasoning_content(nested)
+        if nested_reasoning:
+            return nested_reasoning
     return ""
 
 
@@ -1677,6 +1850,62 @@ def _tool_result_to_text(result: Any) -> str:
         return json.dumps(result, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
         return str(result)
+
+
+def _is_tool_failure_content(content: Any) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    failure_prefixes = (
+        "error:",
+        "stderr:",
+        "tool execution failed:",
+        "tool not found:",
+        "invalid parameters:",
+    )
+    if lowered.startswith(failure_prefixes):
+        return True
+    exit_code = _extract_exit_code(text)
+    if exit_code is not None and exit_code != 0:
+        return True
+    if '"error"' in lowered:
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if isinstance(parsed, dict) and parsed.get("error"):
+            return True
+    return False
+
+
+def _extract_tool_failure_summary(content: Any) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    exit_code = _extract_exit_code(text)
+    if exit_code is not None and exit_code != 0:
+        return f"Exit code: {exit_code}"
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text[:240]
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if error:
+            return str(error)[:240]
+    return text[:240]
+
+
+def _extract_exit_code(text: str) -> int | None:
+    marker = "Exit code:"
+    if marker not in text:
+        return None
+    tail = text.rsplit(marker, 1)[-1].strip().splitlines()[0].strip()
+    try:
+        return int(tail)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_text_only_retry_messages(

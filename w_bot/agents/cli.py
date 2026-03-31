@@ -11,7 +11,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
@@ -61,6 +60,7 @@ class CliStreamRenderer:
         self._spinner = CliThinkingSpinner(console_obj)
         self._spinner.start()
         self._buffer = ""
+        self._segments: list[tuple[str, str]] = []
         self._live: Live | None = None
         self._last_refresh_at = 0.0
         self.stream_started = False
@@ -71,15 +71,26 @@ class CliStreamRenderer:
         self._spinner.update(text)
 
     def _renderable(self, *, final: bool = False) -> Any:
-        if final and self._render_markdown and self._buffer.strip():
-            return Markdown(self._buffer)
+        del final
+        rendered = Text()
+        if self._segments:
+            for kind, payload in self._segments:
+                style = "cyan" if kind == "reasoning" else "white"
+                rendered.append(payload, style=style)
+            return rendered
         return Text(self._buffer or "")
 
-    def on_delta(self, delta: str) -> None:
-        payload = delta or ""
+    def on_delta(self, delta: Any) -> None:
+        kind = "answer"
+        payload = delta
+        if isinstance(delta, dict):
+            kind = str(delta.get("kind") or "answer").strip().lower() or "answer"
+            payload = delta.get("text") or ""
+        payload = payload or ""
         if not payload:
             return
         self._buffer += payload
+        self._segments.append((kind, payload))
         if self._live is None:
             if not self._buffer.strip():
                 return
@@ -100,6 +111,7 @@ class CliStreamRenderer:
         if self._live is not None:
             if final_payload and final_payload != self._buffer:
                 self._buffer = final_payload
+                self._segments = [("answer", final_payload)]
             self._live.update(self._renderable(final=True))
             self._live.refresh()
             self._live.stop()
@@ -109,6 +121,8 @@ class CliStreamRenderer:
             return
         self._spinner.stop()
         self._buffer = final_payload
+        if final_payload:
+            self._segments = [("answer", final_payload)]
         self._console.print()
         self._console.print("[bold cyan]W-bot[/bold cyan]")
         self._console.print(self._renderable(final=True))
@@ -333,7 +347,7 @@ def _repl(graph: Any, settings: Settings) -> None:
 
         if not latest_ai_text:
             latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
-        renderer.finish(latest_ai_text)
+        renderer.finish("" if renderer.stream_started else latest_ai_text)
 
 
 def _render_existing_session_history(

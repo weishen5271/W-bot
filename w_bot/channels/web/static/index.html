@@ -185,6 +185,15 @@
       word-break: break-word;
     }
 
+    .assistant-text.reasoning {
+      color: #0f766e;
+    }
+
+    .assistant-text.answer {
+      color: #0f172a;
+      margin-top: 8px;
+    }
+
     .assistant-text.is-streaming::after {
       content: "";
       display: inline-block;
@@ -345,20 +354,24 @@
     const body = document.createElement("div");
     body.className = "assistant-body";
 
+    const reasoning = document.createElement("div");
+    reasoning.className = "assistant-text reasoning is-streaming";
+
     const text = document.createElement("div");
-    text.className = "assistant-text is-streaming";
+    text.className = "assistant-text answer is-streaming";
 
     badge.appendChild(dot);
     badge.appendChild(label);
     meta.appendChild(badge);
     meta.appendChild(phase);
+    body.appendChild(reasoning);
     body.appendChild(text);
     card.appendChild(meta);
     card.appendChild(body);
     messagesEl.appendChild(card);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 
-    return {card, phase, text, dot};
+    return {card, phase, reasoning, text, dot};
   }
 
   async function createSessionAndLoadHistory() {
@@ -414,7 +427,9 @@
     let activeBotMsgEl = assistantCard.text;
 
     let streamText = "";
+    let streamReasoningText = "";
     let pendingRenderText = "";
+    let pendingReasoningText = "";
     let lastRenderAt = performance.now();
     const renderIntervalMs = 50;
     let renderScheduled = false;
@@ -458,19 +473,26 @@
 
     function flushRender(force = false) {
       renderScheduled = false;
-      if (!pendingRenderText) return;
+      if (!pendingRenderText && !pendingReasoningText) return;
       const now = performance.now();
-      if (!force && !pendingRenderText.includes("\n") && now - lastRenderAt < renderIntervalMs) {
+      if (!force && !pendingRenderText.includes("\n") && !pendingReasoningText.includes("\n") && now - lastRenderAt < renderIntervalMs) {
         scheduleRender();
         return;
       }
-      if (!activeBotMsgEl) {
-        activeBotMsgEl = assistantCard.text;
-      }
       const stickToBottom = shouldStickToBottom();
-      streamText += pendingRenderText;
-      pendingRenderText = "";
-      activeBotMsgEl.textContent = streamText;
+      if (pendingReasoningText) {
+        streamReasoningText += pendingReasoningText;
+        pendingReasoningText = "";
+        assistantCard.reasoning.textContent = streamReasoningText;
+      }
+      if (pendingRenderText) {
+        if (!activeBotMsgEl) {
+          activeBotMsgEl = assistantCard.text;
+        }
+        streamText += pendingRenderText;
+        pendingRenderText = "";
+        activeBotMsgEl.textContent = streamText;
+      }
       scrollToBottomIfNeeded(stickToBottom);
       lastRenderAt = now;
     }
@@ -481,8 +503,13 @@
       requestAnimationFrame(() => flushRender(false));
     }
 
-    function enqueueToken(textChunk) {
+    function enqueueToken(textChunk, kind = "answer") {
       if (!textChunk) return;
+      if (kind === "reasoning") {
+        pendingReasoningText += textChunk;
+        scheduleRender();
+        return;
+      }
       if (!activeBotMsgEl) {
         activeBotMsgEl = assistantCard.text;
       }
@@ -548,7 +575,7 @@
             if (!hasToken) {
               assistantCard.phase.textContent = parsed.text;
             }
-          } else if (event === "token" && parsed.text) {
+          } else if (event === "token" && (parsed.text || parsed.tokens)) {
             if (!hasToken) {
               hasToken = true;
               stopThinking();
@@ -558,7 +585,13 @@
               botMessageById.set(String(parsed.stream_id), activeBotMsgEl || assistantCard.text);
               activeBotMsgEl = botMessageById.get(String(parsed.stream_id));
             }
-            enqueueToken(parsed.text);
+            if (Array.isArray(parsed.tokens)) {
+              for (const token of parsed.tokens) {
+                enqueueToken(String(token.text || ""), String(token.kind || "answer"));
+              }
+            } else if (parsed.text) {
+              enqueueToken(parsed.text, String(parsed.kind || "answer"));
+            }
           } else if (event === "stream_meta") {
             if (parsed.stream_id) {
               const msgId = String(parsed.stream_id);
@@ -606,6 +639,7 @@
             stopThinking();
             flushRender(true);
             assistantCard.phase.textContent = "处理完成";
+            assistantCard.reasoning.classList.remove("is-streaming");
             assistantCard.text.classList.remove("is-streaming");
             assistantCard.dot.style.animation = "none";
             assistantCard.dot.style.boxShadow = "none";

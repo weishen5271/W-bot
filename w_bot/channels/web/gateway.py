@@ -269,7 +269,10 @@ def _build_app(
                 loop.call_soon_threadsafe(event_queue.put_nowait, (event_name, payload))
 
             def worker() -> None:
-                stream_assembler = StreamTextAssembler()
+                stream_assemblers = {
+                    "reasoning": StreamTextAssembler(),
+                    "answer": StreamTextAssembler(),
+                }
                 token_event_count = 0
                 stream_id = 1
                 token_buffer = ""
@@ -294,7 +297,7 @@ def _build_app(
                     token_event_count += 1
                     streamed_any_token = True
                     payload_json = json.dumps(
-                        {"text": token_buffer, "stream_id": stream_id},
+                        {"tokens": [json.loads(line) for line in token_buffer.splitlines() if line.strip()], "stream_id": stream_id},
                         ensure_ascii=False,
                     )
                     enqueue_event("token", payload_json)
@@ -322,14 +325,23 @@ def _build_app(
                         ),
                     )
 
-                def emit_token(text: str) -> None:
+                def emit_token(token: Any) -> None:
                     nonlocal token_buffer
+                    kind = "answer"
+                    text = token
+                    if isinstance(token, dict):
+                        kind = str(token.get("kind") or "answer").strip().lower() or "answer"
+                        text = token.get("text") or ""
                     if not text:
                         return
-                    delta = stream_assembler.consume(text)
+                    assembler = stream_assemblers.get(kind)
+                    if assembler is None:
+                        assembler = StreamTextAssembler()
+                        stream_assemblers[kind] = assembler
+                    delta = assembler.consume(text)
                     if not delta:
                         return
-                    token_buffer += delta
+                    token_buffer += json.dumps({"text": delta, "kind": kind}, ensure_ascii=False) + "\n"
                     should_force_flush = ("\n" in delta) or any(mark in delta for mark in ("。", "！", "？", ".", "!", "?"))
                     flush_token_buffer(force=should_force_flush)
 
@@ -436,7 +448,7 @@ def _build_app(
                     if not emitted_any_token and done_reply.strip():
                         # Fallback: if upstream callback tokens were not observed, still stream in chunks.
                         for chunk in _chunk_text(done_reply, size=18):
-                            payload_json = json.dumps({"text": chunk}, ensure_ascii=False)
+                            payload_json = json.dumps({"text": chunk, "kind": "answer"}, ensure_ascii=False)
                             yield _sse_event("token", payload_json)
                             await asyncio.sleep(0.01)
                     payload_json = json.dumps({"reply": done_reply, "_streamed": done_streamed}, ensure_ascii=False)
