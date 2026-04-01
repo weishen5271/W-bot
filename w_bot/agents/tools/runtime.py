@@ -8,6 +8,7 @@ from ..memory import LongTermMemoryStore
 from .base import Tool
 from .cron import CronTool
 from .filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from .memory_tool import SaveMemoryTool
 from .mcp import build_mcp_tools
 from .message import MessageTool
 from .registry import ToolRegistry
@@ -51,6 +52,7 @@ def build_tools(
     registry.register(WebSearchTool(provider="tavily" if tavily_api_key else "duckduckgo", api_key=tavily_api_key))
     registry.register(WebFetchTool())
     registry.register(MessageTool(workspace_root))
+    registry.register(SaveMemoryTool(memory_store=memory_store, user_id=user_id))
     registry.register(SpawnTool(workspace_root))
     registry.register(
         ExecTool(

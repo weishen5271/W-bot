@@ -36,7 +36,21 @@
       "enabled": true,
       "maxRecentUserTurns": 6,
       "summaryTriggerMessages": 12,
-      "summaryMaxChars": 1200
+      "summaryMaxChars": 1200,
+      "contextWindowTokens": 128000,
+      "autoCompactBufferTokens": 13000,
+      "warningThresholdBufferTokens": 20000,
+      "errorThresholdBufferTokens": 20000,
+      "blockingBufferTokens": 3000,
+      "enableDynamicSystemContext": true,
+      "enableGitStatus": true,
+      "gitStatusMaxChars": 2000,
+      "enableProjectInstructionScan": true,
+      "projectInstructionFiles": [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "WBOT.md"
+      ]
     },
     "shortTermMemoryOptimization": {
       "enabled": false,

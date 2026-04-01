@@ -23,6 +23,7 @@ from .multimodal import MultimodalNormalizer, MultimodalRuntimeConfig, parse_hum
 from .openclaw_profile import OpenClawProfileLoader
 from .providers import resolve_provider_capabilities
 from .skills import SkillsLoader
+from .token_tracker import TokenBudgetManager, extract_token_usage, token_count_with_estimation
 
 logger = get_logger(__name__)
 
@@ -60,6 +61,10 @@ class AgentState(TypedDict):
     conversation_summary: str
     summarized_message_count: int
     prepared_system_prompt_base: str
+    latest_token_usage: dict[str, int]
+    session_token_usage: dict[str, int]
+    token_budget_state: dict[str, Any]
+    context_compaction_level: str
     last_tool_failed: bool
     consecutive_tool_failures: int
     last_tool_name: str
@@ -150,6 +155,7 @@ class WBotGraph:
         self._context_builder = ContextBuilder(
             skills_loader=skills_loader,
             openclaw_profile_loader=openclaw_profile_loader,
+            token_optimization_settings=token_optimization_settings,
         )
         self._prepared_system_prompt_base = self._context_builder.build_static_system_prompt(
             base_prompt=_base_system_prompt(),
@@ -164,6 +170,23 @@ class WBotGraph:
             max_recent_user_turns=6,
             summary_trigger_messages=12,
             summary_max_chars=1200,
+            context_window_tokens=128000,
+            auto_compact_buffer_tokens=13000,
+            warning_threshold_buffer_tokens=20000,
+            error_threshold_buffer_tokens=20000,
+            blocking_buffer_tokens=3000,
+            enable_dynamic_system_context=True,
+            enable_git_status=True,
+            git_status_max_chars=2000,
+            enable_project_instruction_scan=True,
+            project_instruction_files=("CLAUDE.md", "AGENTS.md", "WBOT.md"),
+        )
+        self._token_budget = TokenBudgetManager(
+            context_window_tokens=self._token_opt.context_window_tokens,
+            auto_compact_buffer_tokens=self._token_opt.auto_compact_buffer_tokens,
+            warning_threshold_buffer_tokens=self._token_opt.warning_threshold_buffer_tokens,
+            error_threshold_buffer_tokens=self._token_opt.error_threshold_buffer_tokens,
+            blocking_buffer_tokens=self._token_opt.blocking_buffer_tokens,
         )
         self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
         self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
@@ -245,10 +268,10 @@ class WBotGraph:
                 _emit_status(config, "未命中长期记忆，继续直接回答。")
                 return {"long_term_context": ""}
 
-        lines = [f"- {doc.page_content}" for doc in docs]
-        logger.debug("Retrieved %s long-term memory items", len(lines))
-        _emit_status(config, f"已加载 {len(lines)} 条长期记忆。")
-        return {"long_term_context": "\n".join(lines)}
+        rendered = self._memory_store.render_context(docs)
+        logger.debug("Retrieved %s long-term memory items", len(docs))
+        _emit_status(config, f"已加载 {len(docs)} 条长期记忆。")
+        return {"long_term_context": rendered}
 
     def _agent(
         self,
@@ -288,6 +311,13 @@ class WBotGraph:
         conversation_summary = optimized["conversation_summary"].strip()
         if conversation_summary:
             prompt_blocks.append(f"会话摘要（历史压缩）:\n{conversation_summary}")
+        compaction_level = str(optimized.get("context_compaction_level") or "").strip()
+        if compaction_level:
+            prompt_blocks.append(
+                "上下文压缩等级:\n"
+                f"- 当前等级: {compaction_level}\n"
+                "- 等级越高，越应优先引用摘要、关键决策和最近消息，避免重复展开旧内容。"
+            )
         full_system_prompt = "\n\n".join(prompt_blocks)
         messages: list[AnyMessage] = [
             SystemMessage(content=full_system_prompt),
@@ -435,10 +465,19 @@ class WBotGraph:
             _emit_status(config, f"准备执行工具调用：{_summarize_tool_calls(response.tool_calls)}")
         else:
             _emit_status(config, "回复已生成。")
+        latest_usage = extract_token_usage(response)
+        session_usage = _merge_token_usage_dicts(
+            state.get("session_token_usage"),
+            latest_usage.to_dict(),
+        )
         return {
             "messages": [response],
             "conversation_summary": optimized["conversation_summary"],
             "summarized_message_count": optimized["summarized_message_count"],
+            "latest_token_usage": latest_usage.to_dict(),
+            "session_token_usage": session_usage,
+            "token_budget_state": optimized["token_budget_state"],
+            "context_compaction_level": optimized["context_compaction_level"],
         }
 
     def _prepare_prompt_context(
@@ -448,7 +487,16 @@ class WBotGraph:
     ) -> dict[str, str]:
         """预先构建当前回合内可复用的系统提示词固定部分。"""
         _emit_status(config, "正在准备回合级提示词上下文...")
-        return {"prepared_system_prompt_base": self._prepared_system_prompt_base}
+        budget_state = state.get("token_budget_state")
+        budget_snapshot = _format_token_budget_snapshot(
+            budget_state if isinstance(budget_state, dict) else {},
+            state.get("session_token_usage"),
+        )
+        prepared_prompt = self._context_builder.build_turn_system_prompt(
+            base_prompt=_base_system_prompt(),
+            budget_snapshot=budget_snapshot,
+        )
+        return {"prepared_system_prompt_base": prepared_prompt}
 
     def _action(
         self,
@@ -765,20 +813,39 @@ class WBotGraph:
                 "conversation_summary": state.get("conversation_summary", ""),
                 "summarized_message_count": int(state.get("summarized_message_count", 0) or 0),
                 "recent_messages": history,
+                "token_budget_state": {},
+                "context_compaction_level": "off",
             }
 
         summary = str(state.get("conversation_summary", "") or "")
         summarized_count = max(0, int(state.get("summarized_message_count", 0) or 0))
-        recent_start = _recent_window_start(history, max_user_turns=self._token_opt.max_recent_user_turns)
+        estimated_tokens = token_count_with_estimation(history)
+        budget_state = self._token_budget.calculate_state(estimated_tokens)
+        compaction_level = _determine_compaction_level(budget_state.to_dict())
+        recent_turns = self._token_opt.max_recent_user_turns
+        if budget_state.is_above_error_threshold:
+            recent_turns = max(2, min(recent_turns, 4))
+        if budget_state.is_at_blocking_limit:
+            recent_turns = 1
+
+        recent_start = _recent_window_start(history, max_user_turns=recent_turns)
         target_end = min(recent_start, len(history))
         unsummarized_count = max(0, target_end - summarized_count)
+        should_force_summary = budget_state.is_above_auto_compact_threshold or budget_state.is_at_blocking_limit
 
-        if unsummarized_count >= self._token_opt.summary_trigger_messages:
+        if unsummarized_count >= self._token_opt.summary_trigger_messages or (
+            should_force_summary and target_end > summarized_count
+        ):
             if _should_defer_summary_update(config):
                 return {
                     "conversation_summary": summary,
                     "summarized_message_count": summarized_count,
-                    "recent_messages": history[summarized_count:] or history,
+                    "recent_messages": _apply_context_compaction_strategy(
+                        history[summarized_count:] or history,
+                        compaction_level=compaction_level,
+                    ),
+                    "token_budget_state": budget_state.to_dict(),
+                    "context_compaction_level": compaction_level,
                 }
             delta = history[summarized_count:target_end]
             transcript = _messages_to_summary_text(delta)
@@ -795,11 +862,16 @@ class WBotGraph:
                     len(summary),
                 )
 
-        recent_messages = history[recent_start:]
+        recent_messages = _apply_context_compaction_strategy(
+            history[recent_start:],
+            compaction_level=compaction_level,
+        )
         return {
             "conversation_summary": summary,
             "summarized_message_count": summarized_count,
             "recent_messages": recent_messages,
+            "token_budget_state": budget_state.to_dict(),
+            "context_compaction_level": compaction_level,
         }
 
     def _update_summary(
@@ -818,9 +890,10 @@ class WBotGraph:
         """
         prompt = (
             "请维护一段会话滚动摘要，用于后续对话上下文压缩。"
-            "要求：保留目标、约束、已完成、待办、关键偏好和重要结论；"
-            "删除闲聊与重复；输出中文纯文本。"
-            f"长度不超过 {max_chars} 字。"
+            "请输出中文结构化纯文本，并严格使用以下小节："
+            "【目标与约束】【关键决策】【已完成】【待处理】【风险与阻塞】。"
+            "只保留后续继续任务最需要的信息，删除闲聊、重复描述和冗长工具输出。"
+            f"总长度不超过 {max_chars} 字。"
         )
         payload = (
             f"已有摘要：\n{existing_summary or '无'}\n\n"
@@ -837,10 +910,10 @@ class WBotGraph:
             text = _to_text_content(result.content).strip()
         except Exception:
             logger.exception("Failed to update rolling summary with LLM")
-            text = existing_summary
+            text = _build_summary_fallback(existing_summary=existing_summary, transcript=transcript)
 
         if not text:
-            return existing_summary
+            text = _build_summary_fallback(existing_summary=existing_summary, transcript=transcript)
         if len(text) <= max_chars:
             return text
         return text[:max_chars].rstrip()
@@ -898,6 +971,10 @@ class WBotGraph:
             "prepared_system_prompt_base": str(
                 values.get("prepared_system_prompt_base") or self._prepared_system_prompt_base
             ),
+            "latest_token_usage": values.get("latest_token_usage") or {},
+            "session_token_usage": values.get("session_token_usage") or {},
+            "token_budget_state": values.get("token_budget_state") or {},
+            "context_compaction_level": str(values.get("context_compaction_level") or ""),
         }
         optimized = self._prepare_optimized_context(state=state, history=sanitize_messages_for_llm(messages), config=None)
         if (
@@ -940,6 +1017,202 @@ def _extract_last_user_message(messages: list[AnyMessage]) -> str:
                 return _human_blocks_to_text(message.content)
             return content
     return ""
+
+
+def _merge_token_usage_dicts(previous: Any, latest: dict[str, int]) -> dict[str, int]:
+    base = extract_token_usage(previous)
+    delta = extract_token_usage(latest)
+    return base.add(delta).to_dict()
+
+
+def _format_token_budget_snapshot(
+    budget_state: dict[str, Any],
+    session_usage: Any,
+) -> str:
+    if not budget_state:
+        return ""
+    usage = extract_token_usage(session_usage)
+    lines = [
+        f"- Estimated prompt usage: {int(budget_state.get('used_tokens', 0) or 0)} tokens",
+        f"- Auto-compact threshold: {int(budget_state.get('threshold_tokens', 0) or 0)} tokens",
+        f"- Estimated headroom left: {int(budget_state.get('percent_left', 0) or 0)}%",
+    ]
+    if usage.total > 0:
+        lines.append(
+            "- Session actual usage so far: "
+            f"input={usage.input_tokens}, output={usage.output_tokens}, "
+            f"cache_write={usage.cache_creation_input_tokens}, cache_read={usage.cache_read_input_tokens}, "
+            f"total={usage.total}"
+        )
+    if bool(budget_state.get("is_at_blocking_limit")):
+        lines.append("- Context is near the blocking limit. Prefer concise replies and summarize earlier context aggressively.")
+    elif bool(budget_state.get("is_above_auto_compact_threshold")):
+        lines.append("- Context has crossed the auto-compact threshold. Preserve key decisions, but avoid replaying long history.")
+    elif bool(budget_state.get("is_above_warning_threshold")):
+        lines.append("- Context is in warning range. Avoid unnecessary repetition and verbose tool chatter.")
+    return "\n".join(lines)
+
+
+def _determine_compaction_level(budget_state: dict[str, Any]) -> str:
+    if bool(budget_state.get("is_at_blocking_limit")):
+        return "blocking"
+    if bool(budget_state.get("is_above_auto_compact_threshold")):
+        return "aggressive"
+    if bool(budget_state.get("is_above_error_threshold")):
+        return "elevated"
+    if bool(budget_state.get("is_above_warning_threshold")):
+        return "warning"
+    return "normal"
+
+
+def _apply_context_compaction_strategy(
+    messages: list[AnyMessage],
+    *,
+    compaction_level: str,
+) -> list[AnyMessage]:
+    if compaction_level in {"off", "normal"}:
+        return messages
+
+    tool_limit = 1200
+    ai_limit = 1800
+    human_limit = 2400
+    if compaction_level == "warning":
+        tool_limit = 900
+        ai_limit = 1400
+    elif compaction_level == "elevated":
+        tool_limit = 700
+        ai_limit = 1100
+        human_limit = 1800
+    elif compaction_level == "aggressive":
+        tool_limit = 450
+        ai_limit = 800
+        human_limit = 1400
+    elif compaction_level == "blocking":
+        tool_limit = 280
+        ai_limit = 560
+        human_limit = 1000
+
+    last_human_index = _last_human_index(messages)
+    compacted: list[AnyMessage] = []
+    for index, message in enumerate(messages):
+        limit = ai_limit
+        preserve_tail = True
+        if isinstance(message, HumanMessage):
+            limit = human_limit
+        elif isinstance(message, ToolMessage):
+            limit = tool_limit
+            preserve_tail = False
+
+        if compaction_level == "blocking" and index < last_human_index and isinstance(message, ToolMessage):
+            compacted.append(
+                ToolMessage(
+                    content=_truncate_text_preserving_edges(
+                        _to_text_content(message.content).strip() or "(tool output omitted due to context pressure)",
+                        max_chars=limit,
+                        preserve_tail=False,
+                    ),
+                    tool_call_id=message.tool_call_id,
+                    name=message.name,
+                )
+            )
+            continue
+
+        compacted.append(
+            _clone_message_with_truncated_content(
+                message,
+                max_chars=limit,
+                preserve_tail=preserve_tail,
+            )
+        )
+    return compacted
+
+
+def _clone_message_with_truncated_content(
+    message: AnyMessage,
+    *,
+    max_chars: int,
+    preserve_tail: bool,
+) -> AnyMessage:
+    text = _to_text_content(message.content).strip()
+    if not text or len(text) <= max_chars:
+        return message
+    clipped = _truncate_text_preserving_edges(text, max_chars=max_chars, preserve_tail=preserve_tail)
+    if isinstance(message, HumanMessage):
+        return HumanMessage(content=clipped, additional_kwargs=getattr(message, "additional_kwargs", {}))
+    if isinstance(message, ToolMessage):
+        return ToolMessage(
+            content=clipped,
+            tool_call_id=message.tool_call_id,
+            name=message.name,
+            additional_kwargs=getattr(message, "additional_kwargs", {}),
+        )
+    if isinstance(message, AIMessage):
+        return AIMessage(
+            content=clipped,
+            tool_calls=getattr(message, "tool_calls", []),
+            additional_kwargs=getattr(message, "additional_kwargs", {}),
+        )
+    return message
+
+
+def _truncate_text_preserving_edges(
+    text: str,
+    *,
+    max_chars: int,
+    preserve_tail: bool,
+) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 40:
+        return text[:max_chars]
+    head = max_chars if not preserve_tail else max_chars * 2 // 3
+    tail = 0 if not preserve_tail else max_chars - head - 9
+    head_text = text[:head].rstrip()
+    tail_text = text[-tail:].lstrip() if tail > 0 else ""
+    if tail_text:
+        return f"{head_text}\n...[truncated]...\n{tail_text}"
+    return f"{head_text}\n...[truncated]"
+
+
+def _last_human_index(messages: list[AnyMessage]) -> int:
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return index
+    return -1
+
+
+def _build_summary_fallback(*, existing_summary: str, transcript: str) -> str:
+    snippets = [line.strip() for line in transcript.splitlines() if line.strip()]
+    goal_lines: list[str] = []
+    decision_lines: list[str] = []
+    done_lines: list[str] = []
+    todo_lines: list[str] = []
+    risk_lines: list[str] = []
+    keywords_done = ("已", "完成", "done", "fixed", "updated", "created")
+    keywords_todo = ("待", "TODO", "todo", "next", "继续", "需要", "will")
+    keywords_risk = ("风险", "失败", "error", "warn", "阻塞", "问题")
+    keywords_decision = ("决定", "约束", "限制", "必须", "改为", "使用")
+    for line in snippets[-24:]:
+        if line.startswith("用户:") and len(goal_lines) < 4:
+            goal_lines.append(line)
+        if any(keyword.lower() in line.lower() for keyword in keywords_decision) and len(decision_lines) < 4:
+            decision_lines.append(line)
+        if any(keyword.lower() in line.lower() for keyword in keywords_done) and len(done_lines) < 4:
+            done_lines.append(line)
+        if any(keyword.lower() in line.lower() for keyword in keywords_todo) and len(todo_lines) < 4:
+            todo_lines.append(line)
+        if any(keyword.lower() in line.lower() for keyword in keywords_risk) and len(risk_lines) < 4:
+            risk_lines.append(line)
+
+    blocks = []
+    if existing_summary.strip():
+        blocks.append(f"【已有摘要】\n{existing_summary.strip()}")
+    blocks.append("【目标与约束】\n" + ("\n".join(f"- {item}" for item in goal_lines) if goal_lines else "- 无"))
+    blocks.append("【关键决策】\n" + ("\n".join(f"- {item}" for item in decision_lines) if decision_lines else "- 无"))
+    blocks.append("【已完成】\n" + ("\n".join(f"- {item}" for item in done_lines) if done_lines else "- 无"))
+    blocks.append("【待处理】\n" + ("\n".join(f"- {item}" for item in todo_lines) if todo_lines else "- 无"))
+    blocks.append("【风险与阻塞】\n" + ("\n".join(f"- {item}" for item in risk_lines) if risk_lines else "- 无"))
+    return "\n\n".join(blocks)
 
 
 def _base_system_prompt() -> str:

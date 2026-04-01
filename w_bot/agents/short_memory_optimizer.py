@@ -353,20 +353,45 @@ def _build_summary_text(
     checkpoint_ns: str,
     checkpoint_ids: list[str],
 ) -> str:
-    """构造摘要文本，替代历史原文。"""
+    """构造分层摘要文本，替代历史原文。"""
     now = datetime.now(timezone.utc).isoformat()
+    source_count = len(checkpoint_ids)
+    if source_count >= 100:
+        compaction_level = "aggressive"
+    elif source_count >= 40:
+        compaction_level = "elevated"
+    else:
+        compaction_level = "normal"
     brief = (
         f"Rolling summary for thread={thread_id}, ns={checkpoint_ns}, "
-        f"checkpoints={len(checkpoint_ids)}, range={checkpoint_ids[-1]}..{checkpoint_ids[0]}"
+        f"checkpoints={source_count}, range={checkpoint_ids[-1]}..{checkpoint_ids[0]}"
     )
     payload = {
         "generated_at": now,
         "thread_id": thread_id,
         "checkpoint_ns": checkpoint_ns,
-        "source_count": len(checkpoint_ids),
+        "source_count": source_count,
         "first_checkpoint_id": checkpoint_ids[-1],
         "last_checkpoint_id": checkpoint_ids[0],
         "source_checkpoint_ids": checkpoint_ids,
+        "summary_type": "rolling_compaction",
+        "compaction_level": compaction_level,
+        "layers": {
+            "identity": {
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+            },
+            "range": {
+                "first_checkpoint_id": checkpoint_ids[-1],
+                "last_checkpoint_id": checkpoint_ids[0],
+                "source_count": source_count,
+            },
+            "strategy": {
+                "mode": "batch_summary",
+                "preserves_recent_checkpoints": True,
+                "recommended_restore_order": ["range", "strategy", "source_checkpoint_ids"],
+            },
+        },
         "brief": brief,
     }
     return json.dumps(payload, ensure_ascii=False)

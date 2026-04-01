@@ -76,6 +76,16 @@ class TokenOptimizationSettings:
     max_recent_user_turns: int
     summary_trigger_messages: int
     summary_max_chars: int
+    context_window_tokens: int
+    auto_compact_buffer_tokens: int
+    warning_threshold_buffer_tokens: int
+    error_threshold_buffer_tokens: int
+    blocking_buffer_tokens: int
+    enable_dynamic_system_context: bool
+    enable_git_status: bool
+    git_status_max_chars: int
+    enable_project_instruction_scan: bool
+    project_instruction_files: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -285,6 +295,70 @@ def load_settings(
                 "summary_max_chars",
                 default=1200,
             ),
+            context_window_tokens=_int_value(
+                token_opt_payload,
+                "contextWindowTokens",
+                "context_window_tokens",
+                default=128000,
+            ),
+            auto_compact_buffer_tokens=_int_value(
+                token_opt_payload,
+                "autoCompactBufferTokens",
+                "auto_compact_buffer_tokens",
+                default=13000,
+            ),
+            warning_threshold_buffer_tokens=_int_value(
+                token_opt_payload,
+                "warningThresholdBufferTokens",
+                "warning_threshold_buffer_tokens",
+                default=20000,
+            ),
+            error_threshold_buffer_tokens=_int_value(
+                token_opt_payload,
+                "errorThresholdBufferTokens",
+                "error_threshold_buffer_tokens",
+                default=20000,
+            ),
+            blocking_buffer_tokens=_int_value(
+                token_opt_payload,
+                "blockingBufferTokens",
+                "blocking_buffer_tokens",
+                default=3000,
+            ),
+            enable_dynamic_system_context=_bool_value(
+                token_opt_payload,
+                "enableDynamicSystemContext",
+                "enable_dynamic_system_context",
+                default=True,
+            ),
+            enable_git_status=_bool_value(
+                token_opt_payload,
+                "enableGitStatus",
+                "enable_git_status",
+                default=True,
+            ),
+            git_status_max_chars=_int_value(
+                token_opt_payload,
+                "gitStatusMaxChars",
+                "git_status_max_chars",
+                default=2000,
+            ),
+            enable_project_instruction_scan=_bool_value(
+                token_opt_payload,
+                "enableProjectInstructionScan",
+                "enable_project_instruction_scan",
+                default=True,
+            ),
+            project_instruction_files=tuple(
+                str(item).strip()
+                for item in _list_value(
+                    token_opt_payload,
+                    "projectInstructionFiles",
+                    "project_instruction_files",
+                    default=["CLAUDE.md", "AGENTS.md", "WBOT.md"],
+                )
+                if str(item).strip()
+            ),
         ),
         short_term_memory_optimization=ShortTermMemoryOptimizationSettings(
             enabled=_bool_value(short_mem_opt_payload, "enabled", default=True),
@@ -464,6 +538,16 @@ def default_app_config() -> dict[str, Any]:
                 "maxRecentUserTurns": 6,
                 "summaryTriggerMessages": 12,
                 "summaryMaxChars": 1200,
+                "contextWindowTokens": 128000,
+                "autoCompactBufferTokens": 13000,
+                "warningThresholdBufferTokens": 20000,
+                "errorThresholdBufferTokens": 20000,
+                "blockingBufferTokens": 3000,
+                "enableDynamicSystemContext": True,
+                "enableGitStatus": True,
+                "gitStatusMaxChars": 2000,
+                "enableProjectInstructionScan": True,
+                "projectInstructionFiles": ["CLAUDE.md", "AGENTS.md", "WBOT.md"],
             },
             "shortTermMemoryOptimization": {
                 "enabled": True,
