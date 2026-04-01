@@ -13,7 +13,8 @@ from .mcp import build_mcp_tools
 from .message import MessageTool
 from .registry import ToolRegistry
 from .shell import ExecTool
-from .spawn import SpawnTool
+from .skill import RunSkillTool
+from .spawn import ListSubagentsTool, SpawnTool, WaitSubagentTool
 from .web import WebFetchTool, WebSearchTool
 
 logger = get_logger(__name__)
@@ -26,6 +27,7 @@ def build_tools(
     tavily_api_key: str,
     enable_cron_service: bool,
     mcp_servers: list[dict[str, Any]] | None,
+    skills_loader: Any | None = None,
     extra_readonly_dirs: list[str] | None = None,
 ) -> list[Tool]:
     logger.info("Building tools for user_id=%s", user_id)
@@ -53,7 +55,11 @@ def build_tools(
     registry.register(WebFetchTool())
     registry.register(MessageTool(workspace_root))
     registry.register(SaveMemoryTool(memory_store=memory_store, user_id=user_id))
+    if skills_loader is not None:
+        registry.register(RunSkillTool(skills_loader=skills_loader))
     registry.register(SpawnTool(workspace_root))
+    registry.register(ListSubagentsTool())
+    registry.register(WaitSubagentTool())
     registry.register(
         ExecTool(
             working_dir=str(workspace_root),

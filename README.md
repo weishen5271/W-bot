@@ -81,13 +81,14 @@ wbot web --config configs/app.json
 
 ### 多 Agent 说明
 
-当前项目默认是单 Agent 执行模型，不会自动判断并开启真正的多 Agent 协作。
+当前项目主流程仍然是单 Agent 驱动，但已经支持由主 Agent 显式拉起后台子 Agent。
 
-- 主流程是 `retrieve_memories -> agent -> action -> agent`。
-- `agent` 节点只判断当前回复是否包含 `tool_calls`，有则进入 `ToolNode`，否则结束。
-- 工具层虽然提供了 `spawn` 接口，但目前只是把任务写入 `.w_bot_spawn_jobs.jsonl`，还没有子 Agent 拉起、结果回收、汇总归并这套闭环。
+- 主流程依然是 `retrieve_memories -> agent -> action -> agent`。
+- 当主 Agent 调用 `spawn` 时，会基于当前上下文 fork 一个独立子 Agent，在后台线程中执行。
+- 子 Agent 具备独立的消息历史、工具白名单、turn 上限和任务状态。
+- 可通过 `list_subagents` 查看状态，通过 `wait_subagent` 等待并收集结果。
 
-因此目前更准确的描述是“单 Agent + 工具调用”，而不是“自动多 Agent 编排”。
+因此当前更准确的描述是“单 Agent 主控 + 显式子 Agent 协作”，而不是完全自动编排。
 
 多模态能力可通过 `agent.multimodal.enabled` 开关控制，默认模板已包含：
 

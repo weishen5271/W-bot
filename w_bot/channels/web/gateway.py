@@ -113,6 +113,7 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
         tavily_api_key=settings.tavily_api_key,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
+        skills_loader=skills_loader,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
 

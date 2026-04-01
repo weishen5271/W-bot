@@ -71,6 +71,15 @@ class SkillsLoader:
                 return skill.path.read_text(encoding="utf-8")
         return None
 
+    def get_skill(self, name: str) -> SkillSpec | None:
+        normalized = name.strip()
+        if not normalized:
+            return None
+        for skill in self.list_skills(filter_unavailable=False):
+            if skill.name == normalized:
+                return skill
+        return None
+
     def load_skills_for_context(self, skill_names: list[str]) -> str:
         parts: list[str] = []
         for name in skill_names:

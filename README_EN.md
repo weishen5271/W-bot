@@ -81,14 +81,14 @@ The old `agent.shortTermMemoryOptimization` settings only applied to the Postgre
 
 ### Multi-Agent Notes
 
-The current project runs as a single-agent workflow by default. It does not automatically decide to fan out into a real multi-agent execution plan.
+The project still uses a single main agent loop, but it now supports explicitly spawning real background subagents.
 
-- The main graph is `retrieve_memories -> agent -> action -> agent`.
-- The `agent` node only decides whether the current model response contains `tool_calls`.
-- The `spawn` tool exists, but currently only writes a pending job into `.w_bot_spawn_jobs.jsonl`.
-- There is no built-in sub-agent launcher, result collector, or reducer loop yet.
+- The main graph remains `retrieve_memories -> agent -> action -> agent`.
+- When the main agent calls `spawn`, W-bot forks a child agent from the current conversation context and runs it in the background.
+- Each child agent gets its own task state, turn limit, and filtered tool set.
+- Use `list_subagents` to inspect job state and `wait_subagent` to collect results.
 
-So the current implementation is more accurately described as "single agent + tool calls", not automatic multi-agent orchestration.
+So the implementation is best described as "single-agent control with explicit subagent collaboration", not fully automatic orchestration.
 
 Example MCP server config:
 
