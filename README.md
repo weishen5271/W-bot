@@ -1,103 +1,370 @@
-# W-bot CLI Agent
+# W-bot
 
 [中文](./README.md) | [English](./README_EN.md)
 
-Java version project: https://github.com/weishen5271/W-bot-java
+Java 版本项目：[W-bot-java](https://github.com/weishen5271/W-bot-java)
 
-W-bot 是一个基于 LangGraph 构建的 CLI Agent。
+W-bot 是一个基于 LangGraph 的本地 Agent 运行框架，当前已经支持：
 
-### 记忆架构
+- CLI 交互模式
+- Web 聊天页面与流式接口
+- 飞书消息网关
+- 长短期记忆
+- OpenClaw 风格档案加载
+- Skill 机制
+- 显式子 Agent 协作
+- MCP 工具接入
+- 多模态输入归一化
+- Token 上下文优化
 
-- 短期记忆：持久化到当前工作区 `memory/short_term_memory.pkl`，按 `session_id` 隔离。
-- 长期记忆：持久化到本地 `MEMORY.MD`。
+项目当前不再只是“一个 CLI Agent”，而是统一配置驱动下的多入口 Agent Runtime。
 
-`MEMORY.MD` 结构：
+## 功能概览
 
-- `User Information`
-- `Preferences`
-- `Project Context`
-- `Important Notes`
+### 1. 多入口运行
 
-该文件由 `save_memory` 工具自动维护。
+- `wbot agent` / `wbot cli`：本地终端交互
+- `wbot web`：启动 Web 服务和内置聊天页面
+- `wbot feishu`：启动飞书长连接网关
 
-### 快速开始
+### 2. 会话与记忆
 
-1. 安装依赖：
+- 短期记忆持久化到工作区 `memory/short_term_memory.pkl`
+- 长期记忆默认写入工作区 `memory/MEMORY.md`
+- CLI 会自动恢复最近一次会话
+- 支持列出、恢复、新建会话
+
+### 3. Skill 机制
+
+- 支持内置 Skills：`w_bot/agents/skills_catalog/<skill>/SKILL.md`
+- 支持工作区 Skills：`skills/<skill>/SKILL.md`
+- 工作区同名 skill 会覆盖内置 skill
+- `always: true` 的 skill 会自动注入系统上下文
+- 运行时会向模型暴露技能摘要，模型可按需读取完整 `SKILL.md`
+
+当前仓库内可直接使用的工作区 skill 示例：
+
+- `juejin-blog-publisher`
+- `juejin-hot-news`
+- `pdf-smart-tool-cn`
+- `skill-creator-2`
+- `weather`
+
+内置 skill：
+
+- `clawhub`
+- `project-analyzer`
+
+### 4. 显式子 Agent 协作
+
+主流程仍然是单 Agent 主控，但已经支持通过工具显式拉起后台子 Agent：
+
+- `spawn`
+- `list_subagents`
+- `wait_subagent`
+- `run_skill`
+
+更准确的描述是：
+
+“单 Agent 主控 + 显式子 Agent 协作”，而不是完全自动编排的多 Agent 框架。
+
+### 5. 多模态处理
+
+当 `agent.multimodal.enabled=true` 时，W-bot 会对输入媒体做统一归一化：
+
+- 图片可按原生图像输入处理
+- 音频、视频、文档会先进入标准化管线
+- 文档可提取文本摘录
+- 大媒体会在历史上下文中压缩为占位信息，避免上下文膨胀
+
+模型路由支持分别配置：
+
+- `textModelName`
+- `imageModelName`
+- `audioModelName`
+
+### 6. Token 优化
+
+支持基于配置的上下文压缩与动态提示词增强：
+
+- 最近轮次裁剪
+- 对话摘要
+- token 预算控制
+- Git 状态注入
+- 项目指令文件扫描
+
+默认会扫描这些项目指令文件：
+
+- `CLAUDE.md`
+- `AGENTS.md`
+- `WBOT.md`
+
+### 7. 工具系统
+
+当前运行时默认会注册这些核心工具：
+
+- 文件读写与编辑
+- 目录浏览
+- Shell 执行
+- Web 搜索
+- Web 抓取
+- 消息工具
+- 长期记忆保存
+- Skill 执行
+- 子 Agent 管理
+- MCP 动态工具
+- 可选 Cron 工具
+
+## 快速开始
+
+### 环境要求
+
+- Python `>=3.10`
+
+### 1. 安装依赖
 
 ```bash
 python -m venv .venv
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 ```
 
-2. 配置 app JSON：
+也可以使用可编辑安装：
+
+```bash
+pip install -e .
+```
+
+### 2. 准备配置
 
 ```bash
 cp configs/app.json.example configs/app.json
-# 然后在 configs/app.json 中填入真实 keys/secrets
 ```
 
-3. 初始化用户档案：
+然后填写至少一组模型提供商配置，例如：
+
+- `providers.dashscope.apiKey`
+- `providers.openai.apiKey`
+- `providers.openrouter.apiKey`
+- `providers.ollama.apiBase`
+
+再指定默认模型：
+
+- `agents.defaults.provider`
+- `agents.defaults.model`
+
+如果 `configs/app.json` 不存在，程序首次启动时也会自动生成模板文件。
+
+### 3. 初始化 OpenClaw 档案
 
 ```bash
-wbot onboard
+wbot onboard --config configs/app.json
 ```
 
-该命令会在用户目录创建 `~/.wbot/`，并从 `w_bot/template/` 复制缺失模板进去，只补齐缺失文件，不覆盖已有文件。
+默认会在 `~/.wbot/` 初始化档案，只补齐缺失文件，不覆盖已有文件。
 
-4. 运行 Agent CLI：
+### 4. 启动
+
+CLI：
 
 ```bash
 wbot agent --config configs/app.json
 ```
 
-飞书网关模式：
+或：
 
 ```bash
-wbot feishu --config configs/app.json
+wbot cli --config configs/app.json
 ```
 
-Web 页面模式：
+Web：
 
 ```bash
 wbot web --config configs/app.json
 ```
 
-启动后打开浏览器访问：`http://127.0.0.1:8000`
+启动后访问：
 
-如果 `configs/app.json` 不存在，程序会自动生成模板文件。
-重启前请先填写 `channels.feishu.appId` 和 `channels.feishu.appSecret`。
+`http://127.0.0.1:8000`
 
-输入 `quit` 或 `exit` 退出。
+飞书：
 
-默认情况下，CLI 会自动恢复上一次短期会话。
-在 CLI 中输入 `/new` 可开启全新的会话上下文。
+```bash
+wbot feishu --config configs/app.json
+```
 
-所有运行时配置统一放在 `configs/app.json`。
-短期记忆默认写入工作区 `memory/short_term_memory.pkl`，可通过 `agent.shortTermMemoryPath` 修改路径。
-原有 `agent.shortTermMemoryOptimization` 配置仅适用于 PostgreSQL 方案，当前本地文件模式下会被忽略，建议关闭。
+## CLI 用法
 
-### 多 Agent 说明
+### 常用命令
 
-当前项目主流程仍然是单 Agent 驱动，但已经支持由主 Agent 显式拉起后台子 Agent。
+```bash
+wbot agent --config configs/app.json
+wbot agent --config configs/app.json --new-session
+wbot agent --config configs/app.json --session-id my_session
+wbot new --config configs/app.json
+wbot resume <session_id> --config configs/app.json
+wbot sessions --config configs/app.json
+```
 
-- 主流程依然是 `retrieve_memories -> agent -> action -> agent`。
-- 当主 Agent 调用 `spawn` 时，会基于当前上下文 fork 一个独立子 Agent，在后台线程中执行。
-- 子 Agent 具备独立的消息历史、工具白名单、turn 上限和任务状态。
-- 可通过 `list_subagents` 查看状态，通过 `wait_subagent` 等待并收集结果。
+### CLI 内部 Slash Commands
 
-因此当前更准确的描述是“单 Agent 主控 + 显式子 Agent 协作”，而不是完全自动编排。
+- `/help`
+- `/new [session_id]`
+- `/resume <session_id>`
+- `/session`
+- `/history [count]`
+- `/stats`
+- `/cost`
+- `/vim [on|off|toggle|status]`
+- `/config`
+- `/skills [skill_name]`
+- `/clear`
+- `/exit`
 
-多模态能力可通过 `agent.multimodal.enabled` 开关控制，默认模板已包含：
+输入 `quit` 或 `exit` 也可以退出。
 
-- 飞书图片会下载到本地 `media/` 并以原生图像块送入模型。
-- 音频/视频/文档会进入统一归一化流程，当前默认以文本占位/摘录回退。
-- 历史消息中的大媒体会自动压缩为占位文本，避免会话上下文过大。
-- 可通过 `agent.modelRouting` 配置不同模态使用的模型（text/image/audio）。
+## 配置说明
 
-MCP server 配置示例：
+所有运行时配置统一放在 `configs/app.json`，核心结构如下：
+
+```json
+{
+  "agent": {},
+  "agents": {
+    "defaults": {}
+  },
+  "providers": {},
+  "channels": {
+    "feishu": {},
+    "web": {}
+  },
+  "threadPrefix": "feishu"
+}
+```
+
+### `agent`
+
+常用字段：
+
+- `memoryFilePath`：长期记忆文件，默认 `memory/MEMORY.md`
+- `shortTermMemoryPath`：短期记忆文件，默认 `memory/short_term_memory.pkl`
+- `sessionStateFilePath`：CLI 会话状态文件，默认 `.w_bot_session.json`
+- `retrieveTopK`：长期记忆检索条数
+- `enableCronService`：是否注册 Cron 工具
+- `mcpServers`：MCP 服务列表
+- `enableSkills`：是否启用 Skills
+- `skillsWorkspaceDir`：工作区 Skills 目录
+- `modelRouting`：文本/图像/音频模型路由
+- `multimodal`：多模态配置
+- `tokenOptimization`：token 优化配置
+- `enableOpenClawProfile`：是否启用 OpenClaw 档案
+- `openClawProfileRootDir`：档案目录，默认 `~/.wbot`
+- `openClawAutoInit`：是否自动补齐档案
+- `loopGuard`：单轮工具调用与递归限制
+- `enableStreaming`：流式相关开关
+- `enableConsoleLogs`：是否输出控制台日志
+
+注意：
+
+- `shortTermMemoryOptimization` 这组配置目前在本地文件 checkpoint 模式下会被忽略
+
+### `agents.defaults`
+
+用于指定默认模型来源和模型名：
+
+- `provider`
+- `model`
+- `temperature`
+
+### `providers`
+
+当前模板已预留多种 OpenAI 兼容提供商配置，例如：
+
+- `custom`
+- `azureOpenai`
+- `anthropic`
+- `openai`
+- `openrouter`
+- `deepseek`
+- `groq`
+- `zhipu`
+- `dashscope`
+- `vllm`
+- `ollama`
+- `ovms`
+- `gemini`
+- `moonshot`
+- `minimax`
+- `mistral`
+- `stepfun`
+- `aihubmix`
+- `siliconflow`
+- `volcengine`
+- `volcengineCodingPlan`
+- `byteplus`
+- `byteplusCodingPlan`
+
+### `channels.web`
+
+```json
+{
+  "enabled": true,
+  "host": "127.0.0.1",
+  "port": 8000
+}
+```
+
+Web 网关提供：
+
+- `GET /`
+- `GET /api/health`
+- `POST /api/session/new`
+- `GET /api/history`
+- `POST /api/chat`
+- `POST /api/chat/stream`
+
+### `channels.feishu`
+
+启动前至少需要填写：
+
+- `appId`
+- `appSecret`
+
+可选控制项包括：
+
+- `allowFrom`
+- `groupPolicy`
+- `replyToMessage`
+- `reactEmoji`
+- `encryptKey`
+- `verificationToken`
+
+## OpenClaw 档案
+
+启用后，W-bot 会从 `~/.wbot/` 加载人格与运行约束上下文。
+
+默认模板包含：
+
+- `AGENTS.md`
+- `SOUL.md`
+- `IDENTITY.md`
+- `USER.md`
+- `TOOLS.md`
+- `BOOTSTRAP.md`
+- `BOOT.md`
+- `HEARTBEAT.md`
+- `memory/MEMORY.md`
+- `memory/HISTORY.md`
+- `skills/`
+
+启动行为：
+
+- `IDENTITY`、`SOUL`、`AGENTS`、`USER`、`TOOLS`、`BOOT`、`HEARTBEAT` 会注入系统提示词
+- `BOOTSTRAP.md` 启动时读取一次后自动删除
+- 当 `memoryFilePath` 为默认值时，会优先使用 OpenClaw 档案下的 `memory/MEMORY.md`
+
+## MCP 配置示例
 
 ```json
 [
@@ -114,63 +381,25 @@ MCP server 配置示例：
 ]
 ```
 
-### Skill 机制
+## 关键目录
 
-项目支持基于文件的 Skill，并按需渐进加载：
+- `w_bot/__main__.py`：统一 CLI 入口
+- `w_bot/agents/agent.py`：LangGraph 主流程
+- `w_bot/agents/cli.py`：CLI 运行时与交互命令
+- `w_bot/agents/config.py`：配置加载与默认模板
+- `w_bot/agents/context.py`：系统提示词与动态上下文构建
+- `w_bot/agents/file_checkpointer.py`：短期记忆持久化
+- `w_bot/agents/memory.py`：长期记忆存储
+- `w_bot/agents/openclaw_profile.py`：OpenClaw 档案加载
+- `w_bot/agents/skills.py`：Skill 发现、检查与摘要
+- `w_bot/agents/subagent.py`：子 Agent 执行与调度
+- `w_bot/agents/tools/runtime.py`：运行时工具注册
+- `w_bot/channels/web/gateway.py`：Web 网关
+- `w_bot/channels/feishu/gateway.py`：飞书网关
+- `configs/app.json.example`：配置模板
 
-- 内置 skills：`w_bot/agents/skills_catalog/<skill>/SKILL.md`
-- 工作区 skills：`skills/<skill>/SKILL.md`（同名时覆盖内置）
-- 满足条件时，`always: true` 的 skill 会注入系统提示词。
-- 所有 skill 会在运行时摘要中展示，模型可按需通过 `read_file` 加载完整内容。
+## 说明
 
-Skill 依赖从 frontmatter 元数据读取：
-
-- `metadata.requires.bins`
-- `metadata.requires.env`
-- `metadata.always`（或顶层 `always`）
-
-内置了 `clawhub` skill，可用于下载技能：
-
-- `npx --yes clawhub@latest ...`
-
-使用前请确保：
-
-- 运行环境有 `npx`
-
-### OpenClaw 档案结构（可选）
-
-支持按 OpenClaw 风格管理 Agent 档案。模板文件存放在 `w_bot/template/`，初始化时会复制到用户目录 `~/.wbot/` 并只补齐缺失项。
-
-默认模板包含：
-
-- `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`TOOLS.md`
-- `BOOTSTRAP.md`、`BOOT.md`、`HEARTBEAT.md`
-- `memory/MEMORY.md`、`memory/HISTORY.md`
-- `skills/`
-
-启动行为：
-
-- `IDENTITY/SOUL/AGENTS/USER/TOOLS/BOOT/HEARTBEAT` 会注入系统提示词上下文。
-- `BOOTSTRAP.md` 在启动时读取一次后自动删除（用完即删）。
-- 当 `memoryFilePath` 仍为默认值时，会优先使用 `memory/MEMORY.md` 作为长期记忆文件。
-
-相关配置项（`agent` 下）：
-
-- `enableOpenClawProfile`：是否启用 OpenClaw 档案加载，默认 `true`
-- `openClawProfileRootDir`：档案根目录，默认 `~/.wbot`
-- `openClawAutoInit`：是否自动补齐缺失档案文件，默认 `true`
-
-### 关键文件
-
-- `w_bot/agents/cli.py`：CLI 运行时与本地短期记忆 checkpoint 连接。
-- `w_bot/agents/agent.py`：LangGraph 节点与路由。
-- `w_bot/agents/context.py`：系统提示词组装（memory + skills）。
-- `w_bot/agents/file_checkpointer.py`：工作区本地短期记忆持久化。
-- `w_bot/agents/memory.py`：本地 `MEMORY.MD` 长期记忆存储。
-- `w_bot/agents/openclaw_profile.py`：OpenClaw 档案加载与启动期处理。
-- `w_bot/agents/skills.py`：skill 发现、可用性检查与摘要渲染。
-- `w_bot/agents/tools/runtime.py`：内置工具与 MCP 动态工具。
-- `w_bot/agents/tools/runtime.py` 中的 `spawn`：当前只记录待处理任务，不会自动执行多 Agent 编排。
-- `w_bot/channels/feishu/gateway.py`：飞书通道网关（WebSocket + agent 交互）。
-- `w_bot/channels/web/gateway.py`：Web 通道网关（HTTP API + 内置聊天页面）。
-- `configs/app.json`：统一应用配置（`agent + channels`）。
+- 当前 README 基于仓库现有代码能力重写
+- 若 `configs/app.json` 缺失，程序会自动生成模板并提示补充必填项
+- Web 与 Feishu 入口和 CLI 共用同一套 Agent 配置与工具体系
