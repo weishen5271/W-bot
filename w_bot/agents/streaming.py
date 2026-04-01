@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Any, Callable
+
+from langchain_core.messages import AIMessage
+
 
 class StreamTextAssembler:
     def __init__(self) -> None:
@@ -30,4 +34,25 @@ class StreamTextAssembler:
                 return delta
         self._text += payload
         return payload
+
+
+def normalize_display_text(text: str | None) -> str:
+    payload = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    while "\n\n\n" in payload:
+        payload = payload.replace("\n\n\n", "\n\n")
+    return payload
+
+
+def latest_non_tool_ai_reply(
+    messages: list[Any],
+    *,
+    content_to_text: Callable[[Any], str],
+) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage) or message.tool_calls:
+            continue
+        text = normalize_display_text(content_to_text(getattr(message, "content", ""))).strip()
+        if text:
+            return text
+    return ""
 

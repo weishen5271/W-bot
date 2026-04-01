@@ -331,6 +331,12 @@
     sessionText.textContent = `session: ${sessionId || "-"}`;
   }
 
+  function normalizeDisplayText(text) {
+    return String(text || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/\n{3,}/g, "\n\n");
+  }
+
   function createAssistantCard() {
     const card = document.createElement("div");
     card.className = "assistant-card";
@@ -483,7 +489,7 @@
       if (pendingReasoningText) {
         streamReasoningText += pendingReasoningText;
         pendingReasoningText = "";
-        assistantCard.reasoning.textContent = streamReasoningText;
+        assistantCard.reasoning.textContent = normalizeDisplayText(streamReasoningText);
       }
       if (pendingRenderText) {
         if (!activeBotMsgEl) {
@@ -491,7 +497,7 @@
         }
         streamText += pendingRenderText;
         pendingRenderText = "";
-        activeBotMsgEl.textContent = streamText;
+        activeBotMsgEl.textContent = normalizeDisplayText(streamText);
       }
       scrollToBottomIfNeeded(stickToBottom);
       lastRenderAt = now;
@@ -618,13 +624,17 @@
             if (msgId && botMessageById.has(msgId)) {
               const existing = botMessageById.get(msgId);
               const stickToBottom = shouldStickToBottom();
-              existing.textContent = msgText;
+              const normalizedText = normalizeDisplayText(msgText);
+              existing.textContent = normalizedText;
+              streamText = normalizedText;
               activeBotMsgEl = existing;
               scrollToBottomIfNeeded(stickToBottom);
             } else {
               const nextEl = assistantCard.text;
               const stickToBottom = shouldStickToBottom();
-              nextEl.textContent = msgText;
+              const normalizedText = normalizeDisplayText(msgText);
+              nextEl.textContent = normalizedText;
+              streamText = normalizedText;
               if (msgId) {
                 botMessageById.set(msgId, nextEl);
               }
@@ -635,9 +645,18 @@
             pendingStatusText = parsed.text;
             assistantCard.phase.textContent = pendingStatusText;
           } else if (event === "done") {
-            finalReply = parsed.reply || finalReply;
+            finalReply = normalizeDisplayText(parsed.reply || finalReply);
             stopThinking();
             flushRender(true);
+            if (finalReply) {
+              if (!activeBotMsgEl) {
+                activeBotMsgEl = assistantCard.text;
+              }
+              if (normalizeDisplayText(activeBotMsgEl.textContent || "") !== finalReply) {
+                streamText = finalReply;
+                activeBotMsgEl.textContent = finalReply;
+              }
+            }
             assistantCard.phase.textContent = "处理完成";
             assistantCard.reasoning.classList.remove("is-streaming");
             assistantCard.text.classList.remove("is-streaming");
@@ -653,7 +672,7 @@
       flushRender(true);
 
       if ((!activeBotMsgEl || !activeBotMsgEl.textContent) && finalReply) {
-        streamText = finalReply;
+        streamText = normalizeDisplayText(finalReply);
         if (!activeBotMsgEl) {
           activeBotMsgEl = assistantCard.text;
           activeBotMsgEl.textContent = streamText;

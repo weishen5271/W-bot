@@ -168,7 +168,6 @@ class WBotGraph:
         self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
         self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
         self._max_consecutive_tool_failures = 2
-        self._max_exec_calls_per_turn = 2
         self._tools_by_name = {
             str(getattr(tool, "name", "")).strip(): tool
             for tool in tools
@@ -311,6 +310,7 @@ class WBotGraph:
         _emit_status(config, "正在生成回复...")
         token_callback = _resolve_stream_token_callback(config) or _get_runtime_token_callback()
         debug_callback = _resolve_debug_callback(config) or _get_runtime_debug_callback()
+        user_goal = _extract_last_user_message(sanitized_history)
         try:
             response = _invoke_llm_with_optional_stream(
                 llm=llm,
@@ -362,6 +362,36 @@ class WBotGraph:
                 logger.exception("Text model invoke failed")
                 _emit_status(config, "模型调用失败，已返回兜底提示。")
                 response = AIMessage(content=_runtime_error_reply_text(exc))
+        continuation_attempts = 0
+        while (
+            not response.tool_calls
+            and continuation_attempts < 1
+            and self._should_continue_after_non_tool_reply(
+                user_goal=user_goal,
+                history=sanitized_history,
+                response=response,
+            )
+        ):
+            continuation_attempts += 1
+            logger.info("Detected incomplete non-tool reply; continuing current turn")
+            _emit_status(config, "检测到当前回复仍像中间状态，继续执行当前任务。")
+            continuation_messages = [
+                *messages,
+                response,
+                HumanMessage(content=_continue_current_task_prompt()),
+            ]
+            try:
+                response = _invoke_llm_with_optional_stream(
+                    llm=llm,
+                    messages=continuation_messages,
+                    token_callback=token_callback,
+                    debug_callback=debug_callback,
+                )
+            except Exception as continuation_exc:
+                logger.exception("Continuation invoke failed")
+                _emit_status(config, "继续执行当前任务时发生异常，本轮先输出当前结果。")
+                response = AIMessage(content=_runtime_error_reply_text(continuation_exc))
+                break
         logger.debug("LLM response received, has_tool_calls=%s", bool(response.tool_calls))
         if response.tool_calls:
             projected_history = [*sanitized_history, response]
@@ -383,38 +413,23 @@ class WBotGraph:
                     )
                 )
             else:
-                exec_calls = _count_named_tool_calls_since_last_human(projected_history, "exec")
-                if exec_calls > self._max_exec_calls_per_turn:
+                signature, repeat_count = _same_tool_call_streak(projected_history)
+                if repeat_count >= self._max_same_tool_call_repeats:
                     logger.warning(
-                        "Tool loop guard triggered: exec_calls=%s, max_exec_calls_per_turn=%s",
-                        exec_calls,
-                        self._max_exec_calls_per_turn,
+                        "Tool loop guard triggered: repeated_call=%s, repeat_count=%s",
+                        signature,
+                        repeat_count,
+                    )
+                    _emit_status(
+                        config,
+                        f"检测到重复工具调用（连续 {repeat_count} 次），本轮停止继续调用。",
                     )
                     response = AIMessage(
                         content=(
-                            "I have already used the exec tool multiple times in this turn. "
-                            "To avoid a slow tool loop, I am stopping here. "
-                            "If you want to continue, please specify the next command or goal more precisely."
-                        )
-                    )
-                else:
-                    signature, repeat_count = _same_tool_call_streak(projected_history)
-                    if repeat_count >= self._max_same_tool_call_repeats:
-                        logger.warning(
-                            "Tool loop guard triggered: repeated_call=%s, repeat_count=%s",
-                            signature,
-                            repeat_count,
-                        )
-                        _emit_status(
-                            config,
-                        f"检测到重复工具调用（连续 {repeat_count} 次），本轮停止继续调用。",
-                        )
-                        response = AIMessage(
-                            content=(
                             f"检测到同一工具调用连续重复 {repeat_count} 次。"
                             "我已停止自动重试，建议调整输入条件或改用其它策略后再继续。"
-                            )
                         )
+                    )
 
         if response.tool_calls:
             _emit_status(config, f"准备执行工具调用：{_summarize_tool_calls(response.tool_calls)}")
@@ -588,6 +603,50 @@ class WBotGraph:
             return "recover"
         logger.debug("Route decision after action: continue agent")
         return "agent"
+
+    def _should_continue_after_non_tool_reply(
+        self,
+        *,
+        user_goal: str,
+        history: list[AnyMessage],
+        response: AIMessage,
+    ) -> bool:
+        if not _should_check_completion_for_turn(user_goal, history):
+            return False
+        response_text = _to_text_content(response.content).strip()
+        if not response_text:
+            return True
+        if _response_looks_incomplete(response_text):
+            return True
+        return not self._judge_reply_complete(user_goal=user_goal, response_text=response_text)
+
+    def _judge_reply_complete(self, *, user_goal: str, response_text: str) -> bool:
+        judge_prompt = (
+            "你是一个严格的任务完成度裁判。"
+            "你只判断 assistant 的最新回复是否已经真正完成了用户请求。"
+            "如果回复仍停留在计划、说明、承诺稍后执行、阶段性汇报、要求用户做本可由 assistant 自己完成的动作，"
+            "或者明显还缺少实现、检查、结果，则返回 CONTINUE。"
+            "只有在用户请求已经被实际完成，或者 assistant 明确说明了无法继续且给出了真实阻塞原因时，才返回 COMPLETE。"
+            "只能输出一个单词：COMPLETE 或 CONTINUE。"
+        )
+        try:
+            decision = self._llm_plain.invoke(
+                [
+                    SystemMessage(content=judge_prompt),
+                    HumanMessage(
+                        content=(
+                            f"用户请求：\n{user_goal.strip() or '(empty)'}\n\n"
+                            f"assistant 最新回复：\n{response_text}\n\n"
+                            "请判断是否已完成。"
+                        )
+                    ),
+                ]
+            )
+        except Exception:
+            logger.debug("Completion judge failed", exc_info=True)
+            return False
+        decision_text = _to_text_content(getattr(decision, "content", "")).strip().upper()
+        return decision_text.startswith("COMPLETE")
 
     def _llm_for_current_turn(
         self,
@@ -1693,6 +1752,81 @@ def _should_enable_tools_for_text(text: str) -> bool:
     if _looks_like_spawn_request(lowered) or _looks_like_message_request(lowered) or _looks_like_cron_request(lowered):
         return True
     return True
+
+
+def _should_check_completion_for_turn(user_text: str, history: list[AnyMessage]) -> bool:
+    lowered = (user_text or "").strip().lower()
+    if not lowered:
+        return False
+    if any(
+        (
+            _looks_like_exec_request(lowered),
+            _looks_like_web_request(lowered),
+            _looks_like_file_edit_request(lowered),
+            _looks_like_file_read_request(lowered),
+            _looks_like_project_inspection_request(lowered),
+            _looks_like_spawn_request(lowered),
+            _looks_like_message_request(lowered),
+            _looks_like_cron_request(lowered),
+        )
+    ):
+        return True
+    return _has_tool_messages_since_last_human(history)
+
+
+def _has_tool_messages_since_last_human(messages: list[AnyMessage]) -> bool:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return False
+        if isinstance(message, ToolMessage):
+            return True
+    return False
+
+
+def _response_looks_incomplete(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return True
+    markers = (
+        "我先",
+        "我会先",
+        "接下来",
+        "下一步",
+        "然后我会",
+        "我将",
+        "稍后",
+        "先检查",
+        "先看看",
+        "先分析",
+        "正在",
+        "请稍等",
+        "如果你愿意",
+        "如果需要我可以",
+        "你可以再",
+        "建议你",
+        "i will",
+        "i'll",
+        "next,",
+        "next step",
+        "let me",
+        "i'm going to",
+        "please provide",
+        "if you want, i can",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    if lowered.endswith(("...", "…", "：", ":")):
+        return True
+    return False
+
+
+def _continue_current_task_prompt() -> str:
+    return (
+        "继续执行当前任务，不要停在计划、说明或中间状态。"
+        "如果还需要工具，直接继续调用工具；如果任务其实已经完成，只输出最终结果。"
+        "不要重复刚才已经说过的计划或过程说明。"
+        "只有在确实缺少必要信息、权限不足或存在真实阻塞时，才停止并明确说明阻塞点。"
+    )
 
 
 def _looks_like_casual_chat(text: str) -> bool:

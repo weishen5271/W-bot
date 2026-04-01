@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from w_bot.agents.agent import message_kind
@@ -24,7 +24,7 @@ from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.skills import SkillsLoader
-from w_bot.agents.streaming import StreamTextAssembler
+from w_bot.agents.streaming import StreamTextAssembler, latest_non_tool_ai_reply, normalize_display_text
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
 
@@ -528,7 +528,7 @@ def _new_session_id(thread_prefix: str) -> str:
 
 def _message_to_text(content: Any) -> str:
     if isinstance(content, str):
-        return content
+        return normalize_display_text(content)
     if isinstance(content, list):
         texts: list[str] = []
         for block in content:
@@ -538,13 +538,13 @@ def _message_to_text(content: Any) -> str:
                 text = block.get("text")
                 if isinstance(text, str) and text.strip():
                     texts.append(text.strip())
-        return "\n".join(texts)
+        return normalize_display_text("\n".join(texts))
     if isinstance(content, dict):
         text = content.get("text")
         if isinstance(text, str):
-            return text
-        return str(content)
-    return str(content)
+            return normalize_display_text(text)
+        return normalize_display_text(str(content))
+    return normalize_display_text(str(content))
 
 
 def _sse_event(event: str, data: str) -> str:
@@ -554,21 +554,7 @@ def _sse_event(event: str, data: str) -> str:
 def _latest_ai_reply_from_result(result: Any) -> str:
     values = result if isinstance(result, dict) else {}
     messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
-    ai_order: list[str] = []
-    ai_text_by_id: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, AIMessage) or message.tool_calls:
-            continue
-        msg_id = str(getattr(message, "id", "") or f"{len(ai_order)}-thought")
-        text = _message_to_text(getattr(message, "content", "")).strip()
-        if not text:
-            continue
-        if msg_id not in ai_text_by_id:
-            ai_order.append(msg_id)
-        ai_text_by_id[msg_id] = text
-    if not ai_order:
-        return ""
-    return "\n\n".join(ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip())
+    return latest_non_tool_ai_reply(messages, content_to_text=_message_to_text)
 
 
 def _chunk_text(text: str, *, size: int) -> list[str]:

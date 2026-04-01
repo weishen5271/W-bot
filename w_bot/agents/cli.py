@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
 from rich.live import Live
@@ -20,6 +20,7 @@ from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
 from .openclaw_profile import OpenClawProfileLoader
 from .skills import SkillsLoader
+from .streaming import latest_non_tool_ai_reply, normalize_display_text
 from .text_sanitizer import sanitize_user_text
 from .tools.runtime import build_tools
 
@@ -381,7 +382,7 @@ def _render_existing_session_history(
 def _message_to_text(message: Any) -> str:
     content = getattr(message, "content", message)
     if isinstance(content, str):
-        return content
+        return normalize_display_text(content)
     if isinstance(content, list):
         lines: list[str] = []
         for block in content:
@@ -392,32 +393,18 @@ def _message_to_text(message: Any) -> str:
                 if text:
                     lines.append(text)
         if lines:
-            return "\n".join(lines)
+            return normalize_display_text("\n".join(lines))
     if isinstance(content, dict):
         text = content.get("text")
         if isinstance(text, str):
-            return text
-    return str(content)
+            return normalize_display_text(text)
+    return normalize_display_text(str(content))
 
 
 def _latest_ai_reply_from_result(result: Any) -> str:
     values = result if isinstance(result, dict) else {}
     messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
-    ai_order: list[str] = []
-    ai_text_by_id: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, AIMessage) or message.tool_calls:
-            continue
-        msg_id = str(getattr(message, "id", "") or f"{len(ai_order)}-thought")
-        text = _message_to_text(message).strip()
-        if not text:
-            continue
-        if msg_id not in ai_text_by_id:
-            ai_order.append(msg_id)
-        ai_text_by_id[msg_id] = text
-    if not ai_order:
-        return ""
-    return "\n\n".join(ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip())
+    return latest_non_tool_ai_reply(messages, content_to_text=lambda content: _message_to_text(content))
 
 
 def _friendly_cli_phase(text: str) -> str:

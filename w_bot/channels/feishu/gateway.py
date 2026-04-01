@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
@@ -23,6 +23,7 @@ from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.skills import SkillsLoader
+from w_bot.agents.streaming import latest_non_tool_ai_reply, normalize_display_text
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
 from w_bot.channels.models import InboundMedia, InboundMessage
@@ -1083,7 +1084,7 @@ def _message_to_text(content: Any) -> str:
         content: 消息内容主体。
     """
     if isinstance(content, str):
-        return content
+        return normalize_display_text(content)
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -1093,28 +1094,14 @@ def _message_to_text(content: Any) -> str:
                     parts.append(text)
             else:
                 parts.append(str(item))
-        return "\n".join(part for part in parts if part)
-    return str(content)
+        return normalize_display_text("\n".join(part for part in parts if part))
+    return normalize_display_text(str(content))
 
 
 def _latest_ai_reply_from_result(result: Any) -> str:
     values = result if isinstance(result, dict) else {}
     messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
-    ai_order: list[str] = []
-    ai_text_by_id: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, AIMessage) or message.tool_calls:
-            continue
-        msg_id = str(getattr(message, "id", "") or f"{len(ai_order)}-thought")
-        text = _message_to_text(getattr(message, "content", "")).strip()
-        if not text:
-            continue
-        if msg_id not in ai_text_by_id:
-            ai_order.append(msg_id)
-        ai_text_by_id[msg_id] = text
-    if not ai_order:
-        return ""
-    return "\n\n".join(ai_text_by_id[msg_id] for msg_id in ai_order if ai_text_by_id.get(msg_id, "").strip())
+    return latest_non_tool_ai_reply(messages, content_to_text=_message_to_text)
 
 
 if __name__ == "__main__":
