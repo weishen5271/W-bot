@@ -4,13 +4,13 @@ import argparse
 import json
 from pathlib import Path
 
-from w_bot.agents.cli import run_cli
 from w_bot.agents.config import (
     DEFAULT_OPENCLAW_PROFILE_ROOT_DIR,
+    load_settings,
     normalize_openclaw_profile_root_dir,
 )
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
-from w_bot.channels.feishu.gateway import run_feishu_gateway
+from w_bot.agents.session_store import SessionStateStore
 
 
 def run_onboard(*, config_path: str = "configs/app.json", root_dir: str | None = None) -> None:
@@ -53,7 +53,10 @@ def _resolve_profile_root_from_config(config_path: str) -> str | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="W-bot entrypoint")
+    parser = argparse.ArgumentParser(
+        description="W-bot CLI entrypoint",
+        epilog="Interactive CLI supports /help, /new, /resume, /session, /history, /stats, /cost, /vim, /config, /skills, /clear, /exit.",
+    )
     subparsers = parser.add_subparsers(dest="mode")
 
     onboard_parser = subparsers.add_parser("onboard", help="Initialize workspace scaffold")
@@ -73,8 +76,55 @@ def main() -> None:
         default="configs/app.json",
         help="Path to app config JSON for agent mode",
     )
+    agent_parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Resume or pin a specific session id",
+    )
+    agent_parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="Start a brand new session instead of restoring the last one",
+    )
     cli_parser = subparsers.add_parser("cli", help="Run agent CLI mode (legacy alias)")
     cli_parser.add_argument(
+        "--config",
+        default="configs/app.json",
+        help="Path to app config JSON for agent mode",
+    )
+    cli_parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Resume or pin a specific session id",
+    )
+    cli_parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="Start a brand new session instead of restoring the last one",
+    )
+    new_parser = subparsers.add_parser("new", help="Start CLI with a new session")
+    new_parser.add_argument(
+        "--config",
+        default="configs/app.json",
+        help="Path to app config JSON for agent mode",
+    )
+    new_parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Optional custom session id",
+    )
+    resume_parser = subparsers.add_parser("resume", help="Start CLI and resume a specific session")
+    resume_parser.add_argument(
+        "session_id",
+        help="Session id to resume",
+    )
+    resume_parser.add_argument(
+        "--config",
+        default="configs/app.json",
+        help="Path to app config JSON for agent mode",
+    )
+    sessions_parser = subparsers.add_parser("sessions", help="List recent CLI sessions")
+    sessions_parser.add_argument(
         "--config",
         default="configs/app.json",
         help="Path to app config JSON for agent mode",
@@ -97,13 +147,42 @@ def main() -> None:
     if mode == "onboard":
         run_onboard(config_path=args.config, root_dir=args.root)
     elif mode == "feishu":
+        from w_bot.channels.feishu.gateway import run_feishu_gateway
+
         run_feishu_gateway(config_path=args.config)
     elif mode == "web":
         from w_bot.channels.web.gateway import run_web_gateway
 
         run_web_gateway(config_path=args.config)
+    elif mode == "sessions":
+        settings = load_settings(config_path=args.config)
+        sessions = SessionStateStore(settings.session_state_file_path).list_recent()
+        if not sessions:
+            print("No saved CLI sessions.")
+            return
+        print("Recent CLI sessions:")
+        for record in sessions:
+            print(f"- {record.session_id} ({record.updated_at})")
+    elif mode == "resume":
+        from w_bot.agents.cli import run_cli
+
+        run_cli(config_path=args.config, session_id=args.session_id)
+    elif mode == "new":
+        from w_bot.agents.cli import run_cli
+
+        run_cli(
+            config_path=args.config,
+            session_id=args.session_id,
+            force_new_session=True,
+        )
     else:
-        run_cli(config_path=getattr(args, "config", "configs/app.json"))
+        from w_bot.agents.cli import run_cli
+
+        run_cli(
+            config_path=getattr(args, "config", "configs/app.json"),
+            session_id=getattr(args, "session_id", None),
+            force_new_session=bool(getattr(args, "new_session", False)),
+        )
 
 
 if __name__ == "__main__":

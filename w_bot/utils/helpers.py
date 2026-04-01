@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import base64
-import imghdr
 from typing import Any
 
 
 def detect_image_mime(raw: bytes) -> str | None:
-    kind = imghdr.what(None, h=raw)
-    if not kind:
-        return None
-    if kind == "jpeg":
-        return "image/jpeg"
-    return f"image/{kind}"
+    signatures = (
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"RIFF", "image/webp"),
+        (b"BM", "image/bmp"),
+    )
+    for prefix, mime in signatures:
+        if raw.startswith(prefix):
+            if mime == "image/webp" and len(raw) >= 12 and raw[8:12] != b"WEBP":
+                continue
+            return mime
+    return None
 
 
 def build_image_content_blocks(
