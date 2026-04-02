@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from rich.console import Console
 from rich.live import Live
+from rich.markdown import Markdown
 from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
@@ -157,7 +158,6 @@ class CliStreamRenderer:
         self._spinner = CliThinkingSpinner(console_obj, runtime_status=runtime_status)
         self._spinner.start()
         self._buffer = ""
-        self._segments: list[tuple[str, str]] = []
         self._live: Live | None = None
         self._last_refresh_at = 0.0
         self._last_token_at = time.monotonic()
@@ -178,34 +178,22 @@ class CliStreamRenderer:
         phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
         self._status_line = phase.strip()
         self._spinner.update(text)
-        if self.stream_started:
-            self._refresh_live(force=True)
 
     def _renderable(self, *, final: bool = False) -> Any:
-        rendered = Text()
-        if self._segments:
-            for kind, payload in self._segments:
-                style = "cyan" if kind == "reasoning" else "white"
-                rendered.append(payload, style=style)
-        else:
-            rendered = Text(self._buffer or "")
-        if not final and self.stream_started and self._status_line:
-            rendered.append("\n\n")
-            rendered.append(f"[状态] {self._status_line}", style="dim")
-        return rendered
+        payload = normalize_display_text(self._buffer)
+        if self._render_markdown and payload:
+            return Markdown(payload)
+        return Text(payload if payload or final else "")
 
     def on_delta(self, delta: Any) -> None:
-        kind = "answer"
         payload = delta
         if isinstance(delta, dict):
-            kind = str(delta.get("kind") or "answer").strip().lower() or "answer"
             payload = delta.get("text") or ""
         payload = payload or ""
         if not payload:
             return
         self._last_token_at = time.monotonic()
-        self._buffer += payload
-        self._segments.append((kind, payload))
+        self._buffer = normalize_display_text(self._buffer + str(payload))
         if self._live is None:
             if not self._buffer.strip():
                 return
@@ -221,7 +209,7 @@ class CliStreamRenderer:
         if self._live is None:
             return
         now = time.monotonic()
-        if not force and (now - self._last_refresh_at) <= 0.02:
+        if not force and (now - self._last_refresh_at) <= 0.05:
             return
         self._live.update(self._renderable(final=False))
         self._live.refresh()
@@ -242,9 +230,7 @@ class CliStreamRenderer:
                 continue
             if status_text == self._last_status_line and idle_seconds < 8.0:
                 continue
-            self._status_line = f"{status_text} | 无新输出 {int(idle_seconds)}s"
-            self._last_status_line = self._status_line
-            self._refresh_live(force=True)
+            self._last_status_line = status_text
 
     def finish(self, final_text: str = "") -> None:
         self._closed.set()
@@ -252,8 +238,7 @@ class CliStreamRenderer:
         final_payload = final_text or self._buffer
         if self._live is not None:
             if final_payload and final_payload != self._buffer:
-                self._buffer = final_payload
-                self._segments = [("answer", final_payload)]
+                self._buffer = normalize_display_text(final_payload)
             self._live.update(self._renderable(final=True))
             self._live.refresh()
             self._live.stop()
@@ -262,9 +247,7 @@ class CliStreamRenderer:
             self._spinner.stop()
             return
         self._spinner.stop()
-        self._buffer = final_payload
-        if final_payload:
-            self._segments = [("answer", final_payload)]
+        self._buffer = normalize_display_text(final_payload)
         self._console.print()
         self._console.print("[bold cyan]W-bot[/bold cyan]")
         self._console.print(self._renderable(final=True))
@@ -931,13 +914,13 @@ class CliInputReader:
 
     def read(self) -> str:
         if self._session is None:
-            return input("\nYou > ")
+            return input("\nYou: ")
         try:
             _flush_pending_tty_input()
             if patch_stdout is not None and HTML is not None:
                 with patch_stdout():
                     return asyncio.run(
-                        self._session.prompt_async(HTML("<b fg='ansicyan'>You &gt;</b> "))
+                        self._session.prompt_async(HTML("<b fg='ansicyan'>You:</b> "))
                     )
             return asyncio.run(self._session.prompt_async())
         except KeyboardInterrupt:

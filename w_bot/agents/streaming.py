@@ -38,6 +38,7 @@ class StreamTextAssembler:
 
 def normalize_display_text(text: str | None) -> str:
     payload = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    payload = "\n".join(line.rstrip() for line in payload.split("\n"))
     while "\n\n\n" in payload:
         payload = payload.replace("\n\n\n", "\n\n")
     return payload
@@ -55,4 +56,3 @@ def latest_non_tool_ai_reply(
         if text:
             return text
     return ""
-
