@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import pickle
 import threading
+import time
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Sequence
 
 from langchain_core.runnables import RunnableConfig
@@ -12,6 +15,16 @@ from langgraph.checkpoint.memory import InMemorySaver
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_LOCK_RETRY_DELAY_SEC = 0.1
+_LOCK_TIMEOUT_SEC = 5.0
+_REPLACE_RETRY_DELAY_SEC = 0.2
+_REPLACE_RETRY_COUNT = 5
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Windows first, but keep module importable elsewhere
+    msvcrt = None
 
 
 class WorkspaceFileCheckpointer(InMemorySaver):
@@ -147,10 +160,86 @@ class WorkspaceFileCheckpointer(InMemorySaver):
             "writes": dict(self.writes),
             "blobs": dict(self.blobs),
         }
-        temp_path = self._file_path.with_suffix(self._file_path.suffix + ".tmp")
-        with temp_path.open("wb") as f:
+        with self._interprocess_lock():
+            temp_path = self._write_temp_payload(payload)
+            try:
+                self._replace_with_retry(temp_path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+
+    def _write_temp_payload(self, payload: dict[str, Any]) -> Path:
+        with NamedTemporaryFile(
+            mode="wb",
+            suffix=".tmp",
+            prefix=f"{self._file_path.name}.",
+            dir=self._file_path.parent,
+            delete=False,
+        ) as f:
             pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-        temp_path.replace(self._file_path)
+            return Path(f.name)
+
+    def _replace_with_retry(self, temp_path: Path) -> None:
+        last_error: PermissionError | None = None
+        for attempt in range(1, _REPLACE_RETRY_COUNT + 1):
+            try:
+                temp_path.replace(self._file_path)
+                if attempt > 1:
+                    logger.warning(
+                        "Retried replacing short-term memory file successfully on attempt %s: %s",
+                        attempt,
+                        self._file_path,
+                    )
+                return
+            except PermissionError as exc:
+                last_error = exc
+                if attempt == _REPLACE_RETRY_COUNT:
+                    break
+                logger.warning(
+                    "Retrying short-term memory file replace after PermissionError "
+                    "(attempt %s/%s): %s",
+                    attempt,
+                    _REPLACE_RETRY_COUNT,
+                    self._file_path,
+                )
+                time.sleep(_REPLACE_RETRY_DELAY_SEC)
+        assert last_error is not None
+        raise last_error
+
+    @contextmanager
+    def _interprocess_lock(self) -> Any:
+        lock_path = self._file_path.with_suffix(self._file_path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock_file:
+            self._acquire_lock(lock_file)
+            try:
+                yield
+            finally:
+                self._release_lock(lock_file)
+
+    def _acquire_lock(self, lock_file: Any) -> None:
+        if msvcrt is None:
+            return
+
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SEC
+        while True:
+            try:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out acquiring short-term memory lock: {self._file_path}")
+                time.sleep(_LOCK_RETRY_DELAY_SEC)
+
+    def _release_lock(self, lock_file: Any) -> None:
+        if msvcrt is None:
+            return
+        try:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            logger.warning("Failed to release short-term memory lock cleanly: %s", self._file_path)
 
 
 def resolve_short_term_memory_path(configured_path: str) -> str:

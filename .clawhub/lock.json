@@ -3,11 +3,15 @@
   "skills": {
     "pdf-smart-tool-cn": {
       "version": "1.1.0",
-      "installedAt": 1774614422452
+      "installedAt": 1775112964992
     },
     "skill-creator-2": {
       "version": "0.1.0",
       "installedAt": 1774700582458
+    },
+    "iyeque-pdf-reader": {
+      "version": "1.1.0",
+      "installedAt": 1775113154019
     }
   }
 }

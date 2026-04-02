@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -16,10 +17,12 @@ from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
 from .config import Settings, load_settings
+from .escalation import EscalationManager, EscalationRequest
 from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
 from .openclaw_profile import OpenClawProfileLoader
+from .runtime_status import RuntimeStatusSnapshot
 from .session_store import (
     RECENT_SESSIONS_LIMIT,
     SessionRecord,
@@ -36,16 +39,35 @@ logger = get_logger(__name__)
 
 try:
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.application import Application
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.enums import EditingMode
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.widgets import Box, Button, Dialog, Frame, Label, TextArea
 except Exception:  # pragma: no cover - graceful fallback when dependency is unavailable
     PromptSession = None
+    Application = None
     AutoSuggestFromHistory = None
     FileHistory = None
     KeyBindings = None
+    KeyPressEvent = Any
+    Layout = None
+    HSplit = None
+    Dimension = None
+    Style = None
+    Box = None
+    Button = None
+    Dialog = None
+    Frame = None
+    Label = None
+    TextArea = None
     EditingMode = None
     Completer = object  # type: ignore[assignment]
     Completion = None
@@ -56,6 +78,8 @@ class CliAppState:
     last_user_text: str = ""
     vim_mode: bool = False
     recent_sessions: list[SessionRecord] = field(default_factory=list)
+    runtime_status: RuntimeStatusSnapshot | None = None
+    deferred_escalation_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -81,13 +105,15 @@ class CliCommandContext:
     graph: Any
     settings: Settings
     session_store: "SessionStateStore"
+    escalation_manager: EscalationManager
     skills_loader: SkillsLoader | None = None
     input_reader: "CliInputReader | None" = None
 
 
 class CliThinkingSpinner:
-    def __init__(self, console_obj: Console) -> None:
+    def __init__(self, console_obj: Console, *, runtime_status: RuntimeStatusSnapshot | None = None) -> None:
         self._console = console_obj
+        self._runtime_status = runtime_status
         self._status = self._console.status("[dim]W-bot 正在思考...[/dim]", spinner="dots")
         self._active = False
 
@@ -100,7 +126,7 @@ class CliThinkingSpinner:
     def update(self, text: str) -> None:
         if not self._active:
             return
-        phase = _friendly_cli_phase(text)
+        phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
         if phase:
             self._status.update(f"[dim]{phase}[/dim]")
 
@@ -112,31 +138,55 @@ class CliThinkingSpinner:
 
 
 class CliStreamRenderer:
-    def __init__(self, console_obj: Console, *, render_markdown: bool = True) -> None:
+    def __init__(
+        self,
+        console_obj: Console,
+        *,
+        render_markdown: bool = True,
+        runtime_status: RuntimeStatusSnapshot | None = None,
+    ) -> None:
         self._console = console_obj
         self._render_markdown = render_markdown
-        self._spinner = CliThinkingSpinner(console_obj)
+        self._runtime_status = runtime_status
+        self._spinner = CliThinkingSpinner(console_obj, runtime_status=runtime_status)
         self._spinner.start()
         self._buffer = ""
         self._segments: list[tuple[str, str]] = []
         self._live: Live | None = None
         self._last_refresh_at = 0.0
+        self._last_token_at = time.monotonic()
+        self._status_line = ""
+        self._last_status_line = ""
+        self._closed = threading.Event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="cli-stream-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
         self.stream_started = False
 
     def update_status(self, text: str) -> None:
-        if self.stream_started:
-            return
+        if self._runtime_status is not None:
+            self._runtime_status.record_status_message(text)
+        phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
+        self._status_line = phase.strip()
         self._spinner.update(text)
+        if self.stream_started:
+            self._refresh_live(force=True)
 
     def _renderable(self, *, final: bool = False) -> Any:
-        del final
         rendered = Text()
         if self._segments:
             for kind, payload in self._segments:
                 style = "cyan" if kind == "reasoning" else "white"
                 rendered.append(payload, style=style)
-            return rendered
-        return Text(self._buffer or "")
+        else:
+            rendered = Text(self._buffer or "")
+        if not final and self.stream_started and self._status_line:
+            rendered.append("\n\n")
+            rendered.append(f"[状态] {self._status_line}", style="dim")
+        return rendered
 
     def on_delta(self, delta: Any) -> None:
         kind = "answer"
@@ -147,6 +197,7 @@ class CliStreamRenderer:
         payload = payload or ""
         if not payload:
             return
+        self._last_token_at = time.monotonic()
         self._buffer += payload
         self._segments.append((kind, payload))
         if self._live is None:
@@ -158,13 +209,40 @@ class CliStreamRenderer:
             self._live = Live(self._renderable(final=False), console=self._console, auto_refresh=False)
             self._live.start()
             self.stream_started = True
+        self._refresh_live(force="\n" in payload)
+
+    def _refresh_live(self, *, force: bool = False) -> None:
+        if self._live is None:
+            return
         now = time.monotonic()
-        if "\n" in payload or (now - self._last_refresh_at) > 0.02:
-            self._live.update(self._renderable(final=False))
-            self._live.refresh()
-            self._last_refresh_at = now
+        if not force and (now - self._last_refresh_at) <= 0.02:
+            return
+        self._live.update(self._renderable(final=False))
+        self._live.refresh()
+        self._last_refresh_at = now
+
+    def _heartbeat_loop(self) -> None:
+        while not self._closed.wait(1.0):
+            if self._live is None:
+                continue
+            idle_seconds = time.monotonic() - self._last_token_at
+            if idle_seconds < 3.0:
+                continue
+            if self._runtime_status is not None:
+                status_text = self._runtime_status.spinner_text().strip()
+            else:
+                status_text = self._status_line.strip()
+            if not status_text:
+                continue
+            if status_text == self._last_status_line and idle_seconds < 8.0:
+                continue
+            self._status_line = f"{status_text} | 无新输出 {int(idle_seconds)}s"
+            self._last_status_line = self._status_line
+            self._refresh_live(force=True)
 
     def finish(self, final_text: str = "") -> None:
+        self._closed.set()
+        self._status_line = ""
         final_payload = final_text or self._buffer
         if self._live is not None:
             if final_payload and final_payload != self._buffer:
@@ -230,12 +308,14 @@ def run_cli(
         if settings.enable_skills
         else None
     )
+    escalation_manager = EscalationManager(settings.escalation_state_file_path)
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
         tavily_api_key=settings.tavily_api_key,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
+        escalation_manager=escalation_manager,
         skills_loader=skills_loader,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
@@ -274,6 +354,7 @@ def run_cli(
         _repl(
             graph=graph,
             settings=settings,
+            escalation_manager=escalation_manager,
             skills_loader=skills_loader,
             force_new_session=force_new_session,
         )
@@ -302,6 +383,7 @@ def _repl(
     graph: Any,
     settings: Settings,
     *,
+    escalation_manager: EscalationManager,
     skills_loader: SkillsLoader | None = None,
     force_new_session: bool = False,
 ) -> None:
@@ -315,8 +397,13 @@ def _repl(
 
     session_store = SessionStateStore(settings.session_state_file_path)
     current_session_id = settings.session_id if force_new_session else (session_store.load() or settings.session_id)
-    session_store.save(current_session_id)
-    app_state = CliAppState(session_id=current_session_id, recent_sessions=session_store.list_recent())
+    runtime_status = RuntimeStatusSnapshot(session_id=current_session_id)
+    session_store.save(current_session_id, workspace_root=str(Path.cwd().resolve()))
+    app_state = CliAppState(
+        session_id=current_session_id,
+        recent_sessions=session_store.list_recent(),
+        runtime_status=runtime_status,
+    )
     logger.info("Loaded session_id=%s", current_session_id)
     console.print(
         f"[bold green]Current session:[/bold green] {current_session_id}  ([bold]/new[/bold] for new session)"
@@ -331,6 +418,9 @@ def _repl(
             continue
 
         app_state.session_id = current_session_id
+        if app_state.runtime_status is not None:
+            app_state.runtime_status.set_session(current_session_id)
+            app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
         app_state.recent_sessions = session_store.list_recent()
         if user_text.startswith("/"):
             command_result = _handle_slash_command(
@@ -340,6 +430,7 @@ def _repl(
                     graph=graph,
                     settings=settings,
                     session_store=session_store,
+                    escalation_manager=escalation_manager,
                     skills_loader=skills_loader,
                     input_reader=input_reader,
                 ),
@@ -366,50 +457,348 @@ def _repl(
             return
 
         logger.info("Received user input, len=%s", len(user_text))
-        app_state.last_user_text = user_text
-        renderer = CliStreamRenderer(console)
-        latest_ai_text = ""
+        _run_agent_turn(
+            graph=graph,
+            settings=settings,
+            session_store=session_store,
+            app_state=app_state,
+            escalation_manager=escalation_manager,
+            user_text=user_text,
+        )
 
-        def emit_status(text: str) -> None:
-            renderer.update_status(text)
 
-        def emit_token(text: str) -> None:
-            payload = text or ""
-            if not payload:
-                return
-            renderer.on_delta(payload)
+def _shorten_text(text: str, limit: int = 120) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: max(0, limit - 3)]}..."
 
-        config = {
-            "configurable": {
-                "thread_id": current_session_id,
-                "status_callback": emit_status,
-                "token_callback": emit_token,
-                "defer_summary_update": True,
-            },
-            "recursion_limit": settings.loop_guard.recursion_limit,
-        }
-        inputs = {"messages": [HumanMessage(content=user_text)]}
 
-        set_runtime_callbacks(token_callback=emit_token, debug_callback=None)
+def _render_escalation_request(request: EscalationRequest) -> str:
+    lines = [
+        f"[bold cyan]Escalation[/bold cyan]: {request.id}",
+        f"- status: {request.status}",
+        f"- risk_type: {request.risk_type}",
+        f"- working_dir: {request.working_dir}",
+        f"- command: {request.command}",
+    ]
+    if request.justification:
+        lines.append(f"- justification: {request.justification}")
+    if request.prefix_rule:
+        lines.append(f"- prefix_rule: {' '.join(request.prefix_rule)}")
+    if request.denial_reason:
+        lines.append(f"- denial_reason: {request.denial_reason}")
+    return "\n".join(lines)
+
+
+def _run_agent_turn(
+    *,
+    graph: Any,
+    settings: Settings,
+    session_store: SessionStateStore,
+    app_state: CliAppState,
+    escalation_manager: EscalationManager | None = None,
+    user_text: str,
+    recent_action_hint: str | None = None,
+) -> str:
+    app_state.last_user_text = user_text
+    if app_state.runtime_status is not None:
+        app_state.runtime_status.set_phase(
+            "analyzing",
+            "分析需求中",
+            recent_action=recent_action_hint or _shorten_text(user_text, 120),
+        )
+        app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+    renderer = CliStreamRenderer(console, runtime_status=app_state.runtime_status)
+    latest_ai_text = ""
+
+    def emit_status(text: str) -> None:
+        renderer.update_status(text)
+
+    def emit_token(text: str) -> None:
+        payload = text or ""
+        if not payload:
+            return
+        renderer.on_delta(payload)
+
+    config = {
+        "configurable": {
+            "thread_id": app_state.session_id,
+            "status_callback": emit_status,
+            "token_callback": emit_token,
+            "defer_summary_update": True,
+        },
+        "recursion_limit": settings.loop_guard.recursion_limit,
+    }
+    inputs = {"messages": [HumanMessage(content=user_text)]}
+
+    set_runtime_callbacks(token_callback=emit_token, debug_callback=None)
+    try:
+        result = graph.invoke(inputs, config=config)
+        latest_ai_text = _latest_ai_reply_from_result(result)
+        _refresh_runtime_usage(graph=graph, app_state=app_state)
+        _persist_session_snapshot(session_store=session_store, app_state=app_state)
+    except Exception as exc:
+        logger.exception("Conversation round failed but REPL will continue")
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        if app_state.runtime_status is not None:
+            app_state.runtime_status.mark_failed(detail or str(exc))
+            app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+        _persist_session_snapshot(session_store=session_store, app_state=app_state)
+        renderer.finish("")
+        console.print(
+            "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]"
+        )
+        _print_failure_report(app_state)
+        if detail:
+            console.print(f"[red]异常详情：{detail}[/red]")
+        return ""
+    finally:
+        clear_runtime_callbacks()
+
+    if not latest_ai_text:
+        latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
+    if app_state.runtime_status is not None:
+        app_state.runtime_status.set_phase("rendering", "整理结果中", recent_action="汇总本轮输出")
+        app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+    renderer.finish("" if renderer.stream_started else latest_ai_text)
+    if app_state.runtime_status is not None:
+        app_state.runtime_status.set_phase("idle", "空闲", recent_action="等待下一条输入")
+        _persist_session_snapshot(session_store=session_store, app_state=app_state)
+    if escalation_manager is not None:
+        _maybe_prompt_escalation_choices(
+            graph=graph,
+            settings=settings,
+            session_store=session_store,
+            app_state=app_state,
+            escalation_manager=escalation_manager,
+        )
+    return latest_ai_text
+
+
+def _maybe_prompt_escalation_choices(
+    *,
+    graph: Any,
+    settings: Settings,
+    session_store: SessionStateStore,
+    app_state: CliAppState,
+    escalation_manager: EscalationManager,
+) -> None:
+    pending_requests = escalation_manager.list_requests(
+        session_id=app_state.session_id,
+        status="pending",
+        limit=20,
+    )
+    if not pending_requests:
+        # Backward-compatible fallback for requests created before thread_id propagation was fixed.
+        pending_requests = escalation_manager.list_requests(
+            session_id="-",
+            status="pending",
+            limit=20,
+        )
+    available_requests = [
+        item for item in pending_requests if item.id not in app_state.deferred_escalation_ids
+    ]
+    if not available_requests:
+        return
+    request = available_requests[0]
+    action = _prompt_escalation_action(request)
+    if action == "approve":
+        app_state.deferred_escalation_ids.discard(request.id)
+        approved = escalation_manager.approve_request(request_id=request.id)
+        if approved is None:
+            console.print(f"[red]提权请求批准失败:[/red] {request.id}")
+            return
+        console.print(f"[bold green]已批准提权请求[/bold green] {approved.id}")
+        console.print(_render_escalation_request(approved))
+        followup = (
+            f"系统通知：提权请求 {approved.id} 已获批准。\n"
+            f"已批准命令：{approved.command}\n"
+            "请继续当前任务；如果需要执行该命令，直接调用对应工具，不要重复申请提权。"
+        )
+        _run_agent_turn(
+            graph=graph,
+            settings=settings,
+            session_store=session_store,
+            app_state=app_state,
+            escalation_manager=escalation_manager,
+            user_text=followup,
+            recent_action_hint=f"批准提权请求 {approved.id}",
+        )
+        return
+    if action == "deny":
+        app_state.deferred_escalation_ids.discard(request.id)
+        denied = escalation_manager.deny_request(request_id=request.id, reason="用户在交互式审批面板中拒绝")
+        if denied is None:
+            console.print(f"[red]拒绝提权请求失败:[/red] {request.id}")
+            return
+        console.print(f"[bold yellow]已拒绝提权请求[/bold yellow] {denied.id}")
+        console.print(_render_escalation_request(denied))
+        return
+    app_state.deferred_escalation_ids.add(request.id)
+
+
+def _prompt_escalation_action(request: EscalationRequest) -> str:
+    title = "提权审批"
+    text = "\n".join(
+        [
+            "本轮操作需要提权，请选择下一步：",
+            "",
+            f"请求ID: {request.id}",
+            f"风险类型: {request.risk_type}",
+            f"工作目录: {request.working_dir}",
+            f"命令/操作: {request.command}",
+            f"用途说明: {request.justification or '[none]'}",
+            f"授权前缀: {' '.join(request.prefix_rule) if request.prefix_rule else '[none]'}",
+        ]
+    )
+    if all(
+        item is not None
+        for item in (Application, Layout, HSplit, Box, Button, Dialog, Frame, Label, TextArea, Style)
+    ):
         try:
-            result = graph.invoke(inputs, config=config)
-            latest_ai_text = _latest_ai_reply_from_result(result)
-        except Exception as exc:
-            logger.exception("Conversation round failed but REPL will continue")
-            renderer.finish("")
-            console.print(
-                "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]"
-            )
-            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-            if detail:
-                console.print(f"[red]异常详情：{detail}[/red]")
-            continue
-        finally:
-            clear_runtime_callbacks()
+            return _run_escalation_tui(title=title, text=text)
+        except Exception:
+            logger.exception("Failed to render prompt_toolkit escalation TUI")
 
-        if not latest_ai_text:
-            latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
-        renderer.finish("" if renderer.stream_started else latest_ai_text)
+    console.print(f"\n[bold yellow]{title}[/bold yellow]")
+    console.print(_render_escalation_request(request))
+    console.print("请选择: [1] 批准并继续  [2] 拒绝  [3] 稍后处理")
+    while True:
+        try:
+            choice = input("Select > ").strip()
+        except EOFError:
+            return "later"
+        except KeyboardInterrupt:
+            return "later"
+        if choice in {"1", "approve", "a"}:
+            return "approve"
+        if choice in {"2", "deny", "d"}:
+            return "deny"
+        if choice in {"3", "later", "l", ""}:
+            return "later"
+        console.print("[yellow]请输入 1、2 或 3。[/yellow]")
+
+
+def _run_escalation_tui(*, title: str, text: str) -> str:
+    assert Application is not None
+    assert Layout is not None
+    assert HSplit is not None
+    assert Box is not None
+    assert Button is not None
+    assert Dialog is not None
+    assert Frame is not None
+    assert Label is not None
+    assert TextArea is not None
+    assert Style is not None
+    assert KeyBindings is not None
+
+    result: dict[str, str] = {"value": "later"}
+
+    def _submit(action: str) -> None:
+        result["value"] = action
+        app.exit(result=action)
+
+    detail_area = TextArea(
+        text=text,
+        read_only=True,
+        scrollbar=True,
+        focusable=True,
+        wrap_lines=True,
+    )
+    hint = Label(
+        text="Tab 切换焦点，方向键滚动详情，Enter 激活按钮，Esc 关闭并稍后处理。",
+        dont_extend_height=True,
+    )
+    approve_button = Button(text="批准并继续", handler=lambda: _submit("approve"))
+    deny_button = Button(text="拒绝", handler=lambda: _submit("deny"))
+    later_button = Button(text="稍后处理", handler=lambda: _submit("later"))
+
+    body = HSplit(
+        [
+            Frame(body=detail_area, title="请求详情"),
+            Box(body=hint, padding_top=1, padding_bottom=0),
+        ],
+        padding=1,
+    )
+    dialog = Dialog(
+        title=title,
+        body=body,
+        buttons=[approve_button, deny_button, later_button],
+        width=Dimension(preferred=100),
+        modal=True,
+    )
+    bindings = KeyBindings()
+
+    @bindings.add("escape")
+    @bindings.add("c-c")
+    def _(event: KeyPressEvent) -> None:
+        del event
+        _submit("later")
+
+    style = Style.from_dict(
+        {
+            "dialog": "bg:#20242b",
+            "dialog frame.label": "bg:#20242b #d7e3ff bold",
+            "dialog.body": "bg:#20242b #f5f7fa",
+            "button": "bg:#31425a #f5f7fa",
+            "button.focused": "bg:#7dd3fc #0b1020 bold",
+            "text-area": "bg:#11161d #f5f7fa",
+            "frame.border": "#5b708f",
+            "label": "#d0d7e2",
+        }
+    )
+    app = Application(
+        layout=Layout(dialog, focused_element=approve_button),
+        key_bindings=bindings,
+        full_screen=True,
+        mouse_support=True,
+        style=style,
+    )
+    app.run()
+    return result["value"]
+
+
+def _refresh_runtime_usage(*, graph: Any, app_state: CliAppState) -> None:
+    status = app_state.runtime_status
+    if status is None:
+        return
+    stats = _collect_session_snapshot_stats(graph=graph, session_id=app_state.session_id)
+    estimate = _estimate_session_cost(stats)
+    status.update_usage(
+        input_tokens=int(stats.get("input_tokens", 0) or 0),
+        output_tokens=int(stats.get("output_tokens", 0) or 0),
+        total_cost=estimate if estimate is not None else status.total_cost,
+    )
+    status.refresh_tasks(graph.list_subagents(limit=20))
+
+
+def _persist_session_snapshot(*, session_store: SessionStateStore, app_state: CliAppState) -> None:
+    status = app_state.runtime_status
+    session_store.save(
+        app_state.session_id,
+        title=_shorten_text(app_state.last_user_text, 80),
+        workspace_root=str(Path.cwd().resolve()),
+        last_phase=status.phase_label if status is not None else "",
+        last_action=status.recent_action if status is not None else "",
+        last_error=status.last_error if status is not None else "",
+        task_count=(status.tasks.running + status.tasks.pending) if status is not None else 0,
+    )
+    app_state.recent_sessions = session_store.list_recent()
+
+
+def _print_failure_report(app_state: CliAppState) -> None:
+    status = app_state.runtime_status
+    if status is None:
+        return
+    lines = [
+        "[bold red][执行失败][/bold red]",
+        f"阶段: {status.last_error_phase or status.phase_label}",
+        f"最后动作: {status.recent_action or '[unknown]'}",
+    ]
+    if status.last_error:
+        lines.append(f"建议关注: {_shorten_text(status.last_error, 160)}")
+    console.print("\n".join(lines))
 
 
 def _render_existing_session_history(
@@ -586,6 +975,12 @@ def _build_slash_commands() -> list[CliSlashCommand]:
         CliSlashCommand("new", "创建一个新的会话", _cmd_new, argument_hint="[session_id]"),
         CliSlashCommand("resume", "恢复指定会话", _cmd_resume, argument_hint="<session_id>"),
         CliSlashCommand("session", "列出最近会话和当前会话", _cmd_session, aliases=("sessions",)),
+        CliSlashCommand("escalation", "查看提权请求状态", _cmd_escalation, aliases=("esc",), argument_hint="[pending|approved|denied|request_id]"),
+        CliSlashCommand("approve", "批准提权请求并继续执行", _cmd_approve, argument_hint="[request_id]"),
+        CliSlashCommand("deny", "拒绝提权请求", _cmd_deny, argument_hint="<request_id> [reason]"),
+        CliSlashCommand("test-escalation-ui", "强制弹出提权 TUI 测试窗口", _cmd_test_escalation_ui),
+        CliSlashCommand("status", "查看当前运行状态与最近动作", _cmd_status),
+        CliSlashCommand("tasks", "查看子任务与后台任务状态", _cmd_tasks, argument_hint="[status|task_id]"),
         CliSlashCommand("history", "查看当前会话最近消息摘要", _cmd_history, argument_hint="[count]"),
         CliSlashCommand("stats", "查看当前会话统计信息", _cmd_stats),
         CliSlashCommand("cost", "查看 token 使用和成本估算", _cmd_cost),
@@ -625,7 +1020,10 @@ def _cmd_help(args: str, context: CliCommandContext) -> CliCommandResult:
 def _cmd_new(args: str, context: CliCommandContext) -> CliCommandResult:
     session_id = args.strip() or datetime.now().strftime("cli_session_%Y%m%d_%H%M%S")
     context.app_state.session_id = session_id
-    context.session_store.save(session_id)
+    if context.app_state.runtime_status is not None:
+        context.app_state.runtime_status.set_session(session_id)
+        context.app_state.runtime_status.set_phase("idle", "空闲", recent_action="已切换到新会话")
+    context.session_store.save(session_id, workspace_root=str(Path.cwd().resolve()))
     return CliCommandResult(message=f"[bold green]Started new session:[/bold green] {session_id}")
 
 
@@ -634,9 +1032,129 @@ def _cmd_resume(args: str, context: CliCommandContext) -> CliCommandResult:
     if not session_id:
         return CliCommandResult(message="[yellow]Usage:[/yellow] /resume <session_id>")
     context.app_state.session_id = session_id
-    context.session_store.save(session_id)
+    if context.app_state.runtime_status is not None:
+        context.app_state.runtime_status.set_session(session_id)
+        context.app_state.runtime_status.set_phase("idle", "空闲", recent_action="已恢复会话")
+    context.session_store.save(session_id, workspace_root=str(Path.cwd().resolve()))
     _render_existing_session_history(graph=context.graph, session_id=session_id)
     return CliCommandResult(message=f"[bold green]Resumed session:[/bold green] {session_id}")
+
+
+def _cmd_escalation(args: str, context: CliCommandContext) -> CliCommandResult:
+    query = args.strip()
+    manager = context.escalation_manager
+    if query and query not in {"pending", "approved", "denied", "all"}:
+        request = manager.get_request(query)
+        if request is None or request.session_id not in {context.app_state.session_id, "-"}:
+            return CliCommandResult(message=f"[yellow]未找到提权请求:[/yellow] {query}")
+        return CliCommandResult(message=_render_escalation_request(request))
+
+    status = None if query in {"", "all"} else query
+    requests = manager.list_requests(
+        session_id=context.app_state.session_id,
+        status=status,
+        limit=10,
+    )
+    if not requests:
+        requests = manager.list_requests(
+            session_id="-",
+            status=status,
+            limit=10,
+        )
+    if not requests:
+        return CliCommandResult(message="[dim]当前会话没有匹配的提权请求。[/dim]")
+    lines = ["[bold cyan]Escalation Requests[/bold cyan]"]
+    for item in requests:
+        lines.append(
+            f"- {item.id} [{item.status}] {item.risk_type} | {_shorten_text(item.command, 80)}"
+        )
+        if item.justification:
+            lines.append(f"  reason: {_shorten_text(item.justification, 100)}")
+    return CliCommandResult(message="\n".join(lines))
+
+
+def _cmd_approve(args: str, context: CliCommandContext) -> CliCommandResult:
+    request_id = args.strip()
+    manager = context.escalation_manager
+    request: EscalationRequest | None = None
+    if request_id:
+        request = manager.get_request(request_id)
+    else:
+        pending = manager.list_requests(
+            session_id=context.app_state.session_id,
+            status="pending",
+            limit=1,
+        )
+        if not pending:
+            pending = manager.list_requests(
+                session_id="-",
+                status="pending",
+                limit=1,
+            )
+        request = pending[0] if pending else None
+    if request is None or request.session_id not in {context.app_state.session_id, "-"}:
+        return CliCommandResult(message="[yellow]当前会话没有可批准的提权请求。[/yellow]")
+    approved = manager.approve_request(request_id=request.id)
+    if approved is None:
+        return CliCommandResult(message=f"[red]提权请求批准失败:[/red] {request.id}")
+
+    console.print(f"[bold green]已批准提权请求[/bold green] {approved.id}")
+    console.print(_render_escalation_request(approved))
+    followup = (
+        f"系统通知：提权请求 {approved.id} 已获批准。\n"
+        f"已批准命令：{approved.command}\n"
+        "请继续当前任务；如果需要执行该命令，直接调用 exec，不要重复申请提权。"
+    )
+    _run_agent_turn(
+        graph=context.graph,
+        settings=context.settings,
+        session_store=context.session_store,
+        app_state=context.app_state,
+        escalation_manager=context.escalation_manager,
+        user_text=followup,
+        recent_action_hint=f"批准提权请求 {approved.id}",
+    )
+    return CliCommandResult(handled=True)
+
+
+def _cmd_deny(args: str, context: CliCommandContext) -> CliCommandResult:
+    parts = args.strip().split(maxsplit=1)
+    if not parts:
+        return CliCommandResult(message="[yellow]Usage:[/yellow] /deny <request_id> [reason]")
+    request_id = parts[0].strip()
+    reason = parts[1].strip() if len(parts) > 1 else ""
+    request = context.escalation_manager.get_request(request_id)
+    if request is None or request.session_id not in {context.app_state.session_id, "-"}:
+        return CliCommandResult(message=f"[yellow]未找到提权请求:[/yellow] {request_id}")
+    denied = context.escalation_manager.deny_request(request_id=request_id, reason=reason)
+    if denied is None:
+        return CliCommandResult(message=f"[red]拒绝提权请求失败:[/red] {request_id}")
+    lines = [f"[bold yellow]已拒绝提权请求[/bold yellow] {denied.id}"]
+    if denied.denial_reason:
+        lines.append(f"原因: {denied.denial_reason}")
+    return CliCommandResult(message="\n".join(lines))
+
+
+def _cmd_test_escalation_ui(args: str, context: CliCommandContext) -> CliCommandResult:
+    del args
+    request = EscalationRequest(
+        id="test-escalation-ui",
+        session_id=context.app_state.session_id,
+        command="read_file C:/Windows/win.ini",
+        working_dir=str(Path.cwd().resolve()),
+        justification="这是一个用于验证终端 TUI 是否能正常显示与选择的测试请求。",
+        prefix_rule=["read_file"],
+        risk_type="workspace_path",
+        status="pending",
+        created_at=datetime.now().isoformat(timespec="seconds"),
+        updated_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    action = _prompt_escalation_action(request)
+    lines = [
+        "[bold cyan]Escalation UI Test[/bold cyan]",
+        f"- selected_action: {action}",
+    ]
+    return CliCommandResult(message="\n".join(lines))
 
 
 def _cmd_session(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -651,7 +1169,70 @@ def _cmd_session(args: str, context: CliCommandContext) -> CliCommandResult:
     else:
         for record in recent:
             marker = " [green](current)[/green]" if record.session_id == context.app_state.session_id else ""
-            lines.append(f"- {record.session_id} [dim]{record.updated_at}[/dim]{marker}")
+            detail_parts = [f"[dim]{record.updated_at}[/dim]"]
+            if record.last_phase:
+                detail_parts.append(f"[dim]{record.last_phase}[/dim]")
+            if record.task_count:
+                detail_parts.append(f"[dim]tasks={record.task_count}[/dim]")
+            lines.append(f"- {record.session_id} {' '.join(detail_parts)}{marker}")
+            if record.title:
+                lines.append(f"  title: {record.title}")
+            if record.last_action:
+                lines.append(f"  last_action: {_shorten_text(record.last_action, 100)}")
+    return CliCommandResult(message="\n".join(lines))
+
+
+def _cmd_status(args: str, context: CliCommandContext) -> CliCommandResult:
+    del args
+    status = context.app_state.runtime_status
+    if status is None:
+        return CliCommandResult(message="[dim]当前运行时状态不可用。[/dim]")
+    status.refresh_tasks(context.graph.list_subagents(limit=20))
+    _refresh_runtime_usage(graph=context.graph, app_state=context.app_state)
+    lines = [
+        "[bold cyan]Runtime Status[/bold cyan]",
+        f"- session: {context.app_state.session_id}",
+        f"- phase: {status.phase_label}",
+        f"- recent_action: {status.recent_action or '[none]'}",
+        f"- tasks: running={status.tasks.running} pending={status.tasks.pending} completed={status.tasks.completed} failed={status.tasks.failed}",
+        f"- tokens: input={status.input_tokens} output={status.output_tokens}",
+    ]
+    if status.total_cost > 0:
+        lines.append(f"- cost: ${status.total_cost:.6f} USD")
+    if status.last_error:
+        lines.append(f"- last_error: {status.last_error_phase or status.phase} | {status.last_error}")
+    if status.tasks.highlighted_tasks:
+        lines.append("- highlighted_tasks:")
+        for item in status.tasks.highlighted_tasks:
+            lines.append(f"  - {item}")
+    return CliCommandResult(message="\n".join(lines))
+
+
+def _cmd_tasks(args: str, context: CliCommandContext) -> CliCommandResult:
+    query = args.strip().lower()
+    jobs = context.graph.list_subagents(limit=20)
+    if query:
+        jobs = [job for job in jobs if query == str(job.get("status") or "").strip().lower() or query in str(job.get("id") or "").lower()]
+    if context.app_state.runtime_status is not None:
+        context.app_state.runtime_status.refresh_tasks(jobs)
+    if not jobs:
+        return CliCommandResult(message="[dim]当前没有匹配的后台任务。[/dim]")
+    lines = ["[bold cyan]Background Tasks[/bold cyan]"]
+    for job in jobs:
+        job_id = str(job.get("id") or "-")
+        label = str(job.get("label") or job.get("agent_type") or "-")
+        status = str(job.get("status") or "-")
+        task = _shorten_text(str(job.get("task") or ""), 80)
+        duration = job.get("duration_seconds") or 0
+        lines.append(f"- {job_id[:8]} [{status}] {label} ({duration}s)")
+        if task:
+            lines.append(f"  task: {task}")
+        error = str(job.get("error") or "").strip()
+        if error:
+            lines.append(f"  error: {_shorten_text(error, 120)}")
+        final_response = str(job.get("final_response") or "").strip()
+        if final_response and status == "completed":
+            lines.append(f"  result: {_shorten_text(final_response, 120)}")
     return CliCommandResult(message="\n".join(lines))
 
 

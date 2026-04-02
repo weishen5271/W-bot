@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..escalation import EscalationManager
 from ..logging_config import get_logger
 from ..memory import LongTermMemoryStore
 from .base import Tool
@@ -27,6 +28,7 @@ def build_tools(
     tavily_api_key: str,
     enable_cron_service: bool,
     mcp_servers: list[dict[str, Any]] | None,
+    escalation_manager: EscalationManager | None = None,
     skills_loader: Any | None = None,
     extra_readonly_dirs: list[str] | None = None,
 ) -> list[Tool]:
@@ -46,11 +48,30 @@ def build_tools(
             workspace=workspace_root,
             allowed_dir=workspace_root,
             extra_allowed_dirs=readonly_roots[1:],
+            escalation_manager=escalation_manager,
         )
     )
-    registry.register(WriteFileTool(workspace=workspace_root, allowed_dir=workspace_root))
-    registry.register(EditFileTool(workspace=workspace_root, allowed_dir=workspace_root))
-    registry.register(ListDirTool(workspace=workspace_root, allowed_dir=workspace_root))
+    registry.register(
+        WriteFileTool(
+            workspace=workspace_root,
+            allowed_dir=workspace_root,
+            escalation_manager=escalation_manager,
+        )
+    )
+    registry.register(
+        EditFileTool(
+            workspace=workspace_root,
+            allowed_dir=workspace_root,
+            escalation_manager=escalation_manager,
+        )
+    )
+    registry.register(
+        ListDirTool(
+            workspace=workspace_root,
+            allowed_dir=workspace_root,
+            escalation_manager=escalation_manager,
+        )
+    )
     registry.register(WebSearchTool(provider="tavily" if tavily_api_key else "duckduckgo", api_key=tavily_api_key))
     registry.register(WebFetchTool())
     registry.register(MessageTool(workspace_root))
@@ -64,6 +85,7 @@ def build_tools(
         ExecTool(
             working_dir=str(workspace_root),
             restrict_to_workspace=True,
+            escalation_manager=escalation_manager,
         )
     )
 

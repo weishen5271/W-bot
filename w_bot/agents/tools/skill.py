@@ -65,5 +65,6 @@ class RunSkillTool(Tool):
             arguments=arguments or {},
             context_messages=list(runtime.get("state_messages") or []),
             thread_id=str(runtime.get("thread_id") or "-"),
+            status_callback=runtime.get("status_callback") if callable(runtime.get("status_callback")) else None,
         )
         return json.dumps(result, ensure_ascii=False, indent=2)

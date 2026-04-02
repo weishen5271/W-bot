@@ -18,6 +18,7 @@ from langchain_core.messages import HumanMessage
 
 from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.escalation import EscalationManager, EscalationRequest
 from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
@@ -83,6 +84,7 @@ class FeishuGateway:
         media_root_dir: str = "media",
         expose_step_logs: bool = True,
         recursion_limit: int = 20,
+        escalation_manager: EscalationManager | None = None,
     ) -> None:
         """初始化对象并保存运行所需依赖。
         
@@ -106,6 +108,7 @@ class FeishuGateway:
         self._media_root = Path(media_root_dir).expanduser()
         self._expose_step_logs = expose_step_logs
         self._recursion_limit = max(1, int(recursion_limit))
+        self._escalation_manager = escalation_manager
         if not self._media_root.is_absolute():
             self._media_root = Path.cwd() / self._media_root
         self._media_root.mkdir(parents=True, exist_ok=True)
@@ -246,6 +249,16 @@ class FeishuGateway:
             )
             return
 
+        escalation_reply = self._handle_escalation_command(text=text, session_id=session_id)
+        if escalation_reply is not None:
+            self._send_text(
+                chat_id=chat_id,
+                open_id=open_id,
+                text=escalation_reply,
+                reply_to_message_id=message_id if self._config.reply_to_message else "",
+            )
+            return
+
         with self._session_lock:
             session_id = self._session_overrides.get(
                 session_key,
@@ -314,6 +327,74 @@ class FeishuGateway:
             return f"步骤状态：\n{status_block}"
 
         return latest_ai_text
+
+    def _handle_escalation_command(self, *, text: str, session_id: str) -> str | None:
+        manager = self._escalation_manager
+        if manager is None:
+            return None
+        normalized = text.strip()
+        if not normalized.startswith("/"):
+            return None
+        parts = normalized.split(maxsplit=2)
+        command = parts[0].lower()
+        if command in {"/escalation", "/esc"}:
+            query = parts[1].strip().lower() if len(parts) > 1 else ""
+            if query and query not in {"pending", "approved", "denied", "all"}:
+                request = manager.get_request(query)
+                if request is None or request.session_id != session_id:
+                    return f"未找到提权请求：{query}"
+                return self._render_escalation_request(request)
+            status = None if query in {"", "all"} else query
+            requests = manager.list_requests(session_id=session_id, status=status, limit=10)
+            if not requests:
+                return "当前会话没有匹配的提权请求。"
+            return "\n\n".join(self._render_escalation_request(item) for item in requests)
+        if command == "/approve":
+            request_id = parts[1].strip() if len(parts) > 1 else ""
+            if not request_id:
+                pending = manager.list_requests(session_id=session_id, status="pending", limit=1)
+                request = pending[0] if pending else None
+            else:
+                request = manager.get_request(request_id)
+            if request is None or request.session_id != session_id:
+                return "当前会话没有可批准的提权请求。"
+            approved = manager.approve_request(request_id=request.id)
+            if approved is None:
+                return f"批准提权请求失败：{request.id}"
+            return (
+                self._render_escalation_request(approved)
+                + "\n\n已批准。请继续描述下一步，或直接让 agent 继续当前任务。"
+            )
+        if command == "/deny":
+            if len(parts) < 2 or not parts[1].strip():
+                return "用法：/deny <request_id> [reason]"
+            request_id = parts[1].strip()
+            reason = parts[2].strip() if len(parts) > 2 else ""
+            request = manager.get_request(request_id)
+            if request is None or request.session_id != session_id:
+                return f"未找到提权请求：{request_id}"
+            denied = manager.deny_request(request_id=request_id, reason=reason)
+            if denied is None:
+                return f"拒绝提权请求失败：{request_id}"
+            return self._render_escalation_request(denied)
+        return None
+
+    @staticmethod
+    def _render_escalation_request(request: EscalationRequest) -> str:
+        lines = [
+            f"提权请求: {request.id}",
+            f"状态: {request.status}",
+            f"风险类型: {request.risk_type}",
+            f"工作目录: {request.working_dir}",
+            f"命令: {request.command}",
+        ]
+        if request.justification:
+            lines.append(f"用途说明: {request.justification}")
+        if request.prefix_rule:
+            lines.append(f"授权前缀: {' '.join(request.prefix_rule)}")
+        if request.denial_reason:
+            lines.append(f"拒绝原因: {request.denial_reason}")
+        return "\n".join(lines)
 
     def _send_text(
         self,
@@ -826,12 +907,14 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         if settings.enable_skills
         else None
     )
+    escalation_manager = EscalationManager(settings.escalation_state_file_path)
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
         tavily_api_key=settings.tavily_api_key,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
+        escalation_manager=escalation_manager,
         skills_loader=skills_loader,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
@@ -871,6 +954,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
             media_root_dir=settings.multimodal.media_root_dir,
             expose_step_logs=settings.expose_step_logs,
             recursion_limit=settings.loop_guard.recursion_limit,
+            escalation_manager=escalation_manager,
         )
         gateway.start()
 

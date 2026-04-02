@@ -30,6 +30,7 @@ class Settings:
     user_id: str
     session_id: str
     session_state_file_path: str
+    escalation_state_file_path: str
     retrieve_top_k: int
     enable_cron_service: bool
     mcp_servers: list[dict[str, Any]]
@@ -197,6 +198,12 @@ def load_settings(
             "sessionStateFilePath",
             "session_state_file_path",
             default=".w_bot_session.json",
+        ),
+        escalation_state_file_path=_string_value(
+            merged,
+            "escalationStateFilePath",
+            "escalation_state_file_path",
+            default=".w_bot_escalations.json",
         ),
         retrieve_top_k=_int_value(merged, "retrieveTopK", "retrieve_top_k", default=4),
         enable_cron_service=_bool_value(
@@ -510,6 +517,7 @@ def default_app_config() -> dict[str, Any]:
             "userId": "feishu_bot",
             "sessionId": "",
             "sessionStateFilePath": ".w_bot_session.json",
+            "escalationStateFilePath": ".w_bot_escalations.json",
             "retrieveTopK": 4,
             "enableCronService": False,
             "mcpServers": [],

@@ -16,12 +16,40 @@ RECENT_SESSIONS_LIMIT = 20
 class SessionRecord:
     session_id: str
     updated_at: str
+    title: str = ""
+    workspace_root: str = ""
+    last_phase: str = ""
+    last_action: str = ""
+    last_error: str = ""
+    task_count: int = 0
 
 
-def upsert_session_record(records: list[SessionRecord], session_id: str) -> list[SessionRecord]:
+def upsert_session_record(
+    records: list[SessionRecord],
+    session_id: str,
+    *,
+    title: str = "",
+    workspace_root: str = "",
+    last_phase: str = "",
+    last_action: str = "",
+    last_error: str = "",
+    task_count: int = 0,
+) -> list[SessionRecord]:
     now = datetime.now().isoformat(timespec="seconds")
     deduped = [record for record in records if record.session_id != session_id]
-    deduped.insert(0, SessionRecord(session_id=session_id, updated_at=now))
+    deduped.insert(
+        0,
+        SessionRecord(
+            session_id=session_id,
+            updated_at=now,
+            title=title,
+            workspace_root=workspace_root,
+            last_phase=last_phase,
+            last_action=last_action,
+            last_error=last_error,
+            task_count=max(0, int(task_count or 0)),
+        ),
+    )
     return deduped[:RECENT_SESSIONS_LIMIT]
 
 
@@ -47,16 +75,44 @@ class SessionStateStore:
             return current_session_id.strip()
         return None
 
-    def save(self, session_id: str) -> None:
+    def save(
+        self,
+        session_id: str,
+        *,
+        title: str = "",
+        workspace_root: str = "",
+        last_phase: str = "",
+        last_action: str = "",
+        last_error: str = "",
+        task_count: int = 0,
+    ) -> None:
         folder = os.path.dirname(os.path.abspath(self._file_path))
         if folder and not os.path.exists(folder):
             os.makedirs(folder, exist_ok=True)
 
-        recent = upsert_session_record(self.list_recent(), session_id)
+        recent = upsert_session_record(
+            self.list_recent(),
+            session_id,
+            title=title,
+            workspace_root=workspace_root,
+            last_phase=last_phase,
+            last_action=last_action,
+            last_error=last_error,
+            task_count=task_count,
+        )
         payload = {
             "current_session_id": session_id,
             "recent_sessions": [
-                {"session_id": record.session_id, "updated_at": record.updated_at}
+                {
+                    "session_id": record.session_id,
+                    "updated_at": record.updated_at,
+                    "title": record.title,
+                    "workspace_root": record.workspace_root,
+                    "last_phase": record.last_phase,
+                    "last_action": record.last_action,
+                    "last_error": record.last_error,
+                    "task_count": record.task_count,
+                }
                 for record in recent[:RECENT_SESSIONS_LIMIT]
             ],
         }
@@ -85,11 +141,23 @@ class SessionStateStore:
                     continue
                 session_id = str(item.get("session_id") or "").strip()
                 updated_at = str(item.get("updated_at") or "").strip()
+                title = str(item.get("title") or "").strip()
+                workspace_root = str(item.get("workspace_root") or "").strip()
+                last_phase = str(item.get("last_phase") or "").strip()
+                last_action = str(item.get("last_action") or "").strip()
+                last_error = str(item.get("last_error") or "").strip()
+                task_count = item.get("task_count") or 0
                 if session_id:
                     records.append(
                         SessionRecord(
                             session_id=session_id,
                             updated_at=updated_at or datetime.now().isoformat(timespec="seconds"),
+                            title=title,
+                            workspace_root=workspace_root,
+                            last_phase=last_phase,
+                            last_action=last_action,
+                            last_error=last_error,
+                            task_count=max(0, int(task_count or 0)),
                         )
                     )
 

@@ -32,6 +32,20 @@ def _context_messages_from_kwargs(kwargs: dict[str, Any]) -> list[Any]:
     return list(messages) if isinstance(messages, list) else []
 
 
+def _status_callback_from_kwargs(kwargs: dict[str, Any]) -> Any:
+    runtime = kwargs.get("_wbot_tool_context")
+    if not isinstance(runtime, dict):
+        return None
+    callback = runtime.get("status_callback")
+    return callback if callable(callback) else None
+
+
+def _emit_tool_status(kwargs: dict[str, Any], text: str) -> None:
+    callback = _status_callback_from_kwargs(kwargs)
+    if callable(callback):
+        callback(str(text))
+
+
 class SpawnTool(Tool):
     """Tool to spawn a background subagent."""
 
@@ -140,5 +154,18 @@ class WaitSubagentTool(Tool):
         graph = _graph_from_kwargs(kwargs)
         if graph is None:
             return "Error: subagent runtime is not available"
-        result = graph.wait_for_subagent(id, timeout_seconds=timeout_seconds)
+        remaining = max(1, int(timeout_seconds))
+        result: dict[str, Any] = {"id": id, "status": "timeout"}
+        while remaining > 0:
+            slice_seconds = min(2, remaining)
+            _emit_tool_status(kwargs, f"正在等待子任务 {id[:8]} 完成（剩余超时 {remaining}s）")
+            result = graph.wait_for_subagent(id, timeout_seconds=slice_seconds)
+            status = str(result.get("status") or "").strip().lower()
+            if status in {"completed", "failed", "timeout", "not_found"}:
+                _emit_tool_status(kwargs, f"子任务 {id[:8]} 当前状态：{status}")
+                break
+            remaining -= slice_seconds
+        else:
+            result = graph.wait_for_subagent(id, timeout_seconds=0)
+            _emit_tool_status(kwargs, f"等待子任务 {id[:8]} 超时")
         return json.dumps(result, ensure_ascii=False, indent=2)

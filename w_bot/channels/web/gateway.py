@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from w_bot.agents.agent import message_kind
 from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.escalation import EscalationManager, EscalationRequest
 from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
@@ -71,6 +72,26 @@ class HistoryResponse(BaseModel):
     messages: list[dict[str, str]]
 
 
+class EscalationActionRequest(BaseModel):
+    session_id: str
+    request_id: str
+    reason: str | None = None
+
+
+class EscalationItemResponse(BaseModel):
+    id: str
+    session_id: str
+    status: str
+    risk_type: str
+    command: str
+    working_dir: str
+    justification: str
+    prefix_rule: list[str]
+    created_at: str
+    updated_at: str
+    denial_reason: str
+
+
 def run_web_gateway(config_path: str = "configs/app.json") -> None:
     settings = load_settings(config_path=config_path)
     setup_logging(enable_console_logs=settings.enable_console_logs)
@@ -107,12 +128,14 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
         if settings.enable_skills
         else None
     )
+    escalation_manager = EscalationManager(settings.escalation_state_file_path)
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
         tavily_api_key=settings.tavily_api_key,
         enable_cron_service=settings.enable_cron_service,
         mcp_servers=settings.mcp_servers,
+        escalation_manager=escalation_manager,
         skills_loader=skills_loader,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
     )
@@ -150,6 +173,7 @@ def run_web_gateway(config_path: str = "configs/app.json") -> None:
             thread_prefix=cfg.thread_prefix,
             expose_step_logs=settings.expose_step_logs,
             recursion_limit=settings.loop_guard.recursion_limit,
+            escalation_manager=escalation_manager,
         )
         uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
 
@@ -160,6 +184,7 @@ def _build_app(
     thread_prefix: str,
     expose_step_logs: bool,
     recursion_limit: int,
+    escalation_manager: EscalationManager,
 ) -> FastAPI:
     app = FastAPI(title="W-bot Web Gateway")
     session_locks: dict[str, threading.Lock] = {}
@@ -252,6 +277,41 @@ def _build_app(
         if not latest_ai_text:
             latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
         return ChatResponse(session_id=session_id, reply=latest_ai_text)
+
+    @app.get("/api/escalations", response_model=list[EscalationItemResponse])
+    def list_escalations(session_id: str, status: str | None = None) -> list[EscalationItemResponse]:
+        if not session_id.strip():
+            raise HTTPException(status_code=400, detail="session_id is required")
+        items = escalation_manager.list_requests(session_id=session_id.strip(), status=status, limit=20)
+        return [_serialize_escalation_item(item) for item in items]
+
+    @app.post("/api/escalations/approve", response_model=EscalationItemResponse)
+    def approve_escalation(payload: EscalationActionRequest) -> EscalationItemResponse:
+        session_id = payload.session_id.strip()
+        request_id = payload.request_id.strip()
+        if not session_id or not request_id:
+            raise HTTPException(status_code=400, detail="session_id and request_id are required")
+        request = escalation_manager.get_request(request_id)
+        if request is None or request.session_id != session_id:
+            raise HTTPException(status_code=404, detail="Escalation request not found")
+        approved = escalation_manager.approve_request(request_id=request_id)
+        if approved is None:
+            raise HTTPException(status_code=500, detail="Failed to approve escalation request")
+        return _serialize_escalation_item(approved)
+
+    @app.post("/api/escalations/deny", response_model=EscalationItemResponse)
+    def deny_escalation(payload: EscalationActionRequest) -> EscalationItemResponse:
+        session_id = payload.session_id.strip()
+        request_id = payload.request_id.strip()
+        if not session_id or not request_id:
+            raise HTTPException(status_code=400, detail="session_id and request_id are required")
+        request = escalation_manager.get_request(request_id)
+        if request is None or request.session_id != session_id:
+            raise HTTPException(status_code=404, detail="Escalation request not found")
+        denied = escalation_manager.deny_request(request_id=request_id, reason=payload.reason or "")
+        if denied is None:
+            raise HTTPException(status_code=500, detail="Failed to deny escalation request")
+        return _serialize_escalation_item(denied)
 
     @app.post("/api/chat/stream")
     def chat_stream(payload: ChatRequest) -> StreamingResponse:
@@ -563,6 +623,22 @@ def _chunk_text(text: str, *, size: int) -> list[str]:
     if not payload:
         return []
     return [payload[i: i + size] for i in range(0, len(payload), size)]
+
+
+def _serialize_escalation_item(item: EscalationRequest) -> EscalationItemResponse:
+    return EscalationItemResponse(
+        id=item.id,
+        session_id=item.session_id,
+        status=item.status,
+        risk_type=item.risk_type,
+        command=item.command,
+        working_dir=item.working_dir,
+        justification=item.justification,
+        prefix_rule=item.prefix_rule,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        denial_reason=item.denial_reason,
+    )
 
 
 def main() -> None:

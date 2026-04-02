@@ -1,0 +1,146 @@
+{
+  "pdf_extractor": {
+    "use_pdfplumber": true,
+    "use_pypdf2": true,
+    "enable_ocr": false,
+    "ocr_lang": "chi_sim+eng",
+    "output_encoding": "utf-8",
+    "fallback_encodings": ["utf-8", "gbk", "gb2312", "latin-1", "cp1252"],
+    "max_pages": null,
+    "extract_images": false,
+    "preserve_layout": false,
+    "x_tolerance": 3,
+    "y_tolerance": 3
+  },
+  
+  "ocr_processor": {
+    "tesseract_cmd": null,
+    "dpi": 300,
+    "output_format": "text",
+    "preserve_interword_spaces": true,
+    "timeout": 300,
+    "page_seg_mode": 3,
+    "ocr_engine_mode": 3,
+    "language_packs": ["chi_sim", "eng"]
+  },
+  
+  "batch_processor": {
+    "output_dir": "extracted_texts",
+    "output_format": "txt",
+    "encoding": "utf-8",
+    "max_workers": 4,
+    "skip_existing": true,
+    "generate_summary": true,
+    "generate_report": true,
+    "recursive": true,
+    "log_level": "INFO"
+  },
+  
+  "file_handling": {
+    "temp_dir": null,
+    "keep_temp_files": false,
+    "max_file_size_mb": 100,
+    "allowed_extensions": [".pdf", ".txt", ".json"],
+    "encoding_detection": true
+  },
+  
+  "output_options": {
+    "text_output": {
+      "include_metadata": true,
+      "include_page_numbers": true,
+      "separator": "=== 第 {page} 页 ===",
+      "trim_whitespace": true,
+      "remove_empty_lines": true
+    },
+    "json_output": {
+      "pretty_print": true,
+      "indent": 2,
+      "ensure_ascii": false,
+      "include_raw_text": true
+    },
+    "html_output": {
+      "template": "simple",
+      "css_style": "default",
+      "include_original_images": false,
+      "responsive": true
+    }
+  },
+  
+  "performance": {
+    "memory_limit_mb": 1024,
+    "timeout_seconds": 600,
+    "chunk_size_pages": 50,
+    "cache_enabled": true,
+    "cache_dir": ".pdf_cache",
+    "cache_ttl_hours": 24
+  },
+  
+  "platform_specific": {
+    "windows": {
+      "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+      "poppler_path": "C:\\poppler\\bin",
+      "console_encoding": "utf-8"
+    },
+    "linux": {
+      "tesseract_cmd": "/usr/bin/tesseract",
+      "poppler_path": "/usr/bin",
+      "temp_dir": "/tmp"
+    },
+    "macos": {
+      "tesseract_cmd": "/usr/local/bin/tesseract",
+      "poppler_path": "/usr/local/bin",
+      "temp_dir": "/tmp"
+    }
+  },
+  
+  "language_support": {
+    "primary_language": "zh-CN",
+    "fallback_language": "en",
+    "ocr_languages": {
+      "chinese_simplified": "chi_sim",
+      "chinese_traditional": "chi_tra",
+      "english": "eng",
+      "japanese": "jpn",
+      "korean": "kor",
+      "french": "fra",
+      "german": "deu",
+      "spanish": "spa"
+    },
+    "encoding_preferences": {
+      "zh-CN": ["utf-8", "gbk", "gb2312"],
+      "en": ["utf-8", "latin-1", "cp1252"],
+      "ja": ["utf-8", "shift_jis", "euc-jp"],
+      "ko": ["utf-8", "euc-kr"]
+    }
+  },
+  
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "date_format": "%Y-%m-%d %H:%M:%S",
+    "log_file": "pdf_reader.log",
+    "max_file_size_mb": 10,
+    "backup_count": 5
+  },
+  
+  "advanced": {
+    "pdf_parsing": {
+      "strict_mode": false,
+      "ignore_warnings": true,
+      "custom_font_map": {},
+      "text_extraction_strategy": "auto"
+    },
+    "image_processing": {
+      "preprocessing_steps": ["grayscale", "contrast", "sharpen"],
+      "contrast_factor": 2.0,
+      "sharpen_factor": 1.5,
+      "binarization_threshold": "auto"
+    },
+    "ocr_optimization": {
+      "preprocess_images": true,
+      "postprocess_text": true,
+      "spell_check": false,
+      "confidence_threshold": 70
+    }
+  }
+}

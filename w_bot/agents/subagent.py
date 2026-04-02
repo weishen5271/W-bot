@@ -58,6 +58,7 @@ class SubagentJobRecord:
     thread_id: str
     config: SubagentConfig
     context_messages: list[BaseMessage] = field(default_factory=list)
+    status_callback: Any | None = None
     result: SubagentResult | None = None
     error: str | None = None
 
@@ -165,6 +166,7 @@ class SubagentManager:
         arguments: dict[str, Any] | None = None,
         context_messages: list[BaseMessage] | None = None,
         thread_id: str = "-",
+        status_callback: Any | None = None,
     ) -> SubagentResult:
         if self._skills_loader is None:
             return SubagentResult(success=False, final_response="", error="Skills are not enabled")
@@ -196,6 +198,7 @@ class SubagentManager:
             thread_id=thread_id,
             config=config,
             context_messages=list(context_messages or []),
+            status_callback=status_callback if callable(status_callback) else None,
         )
         return await self._execute_job(job)
 
@@ -251,6 +254,7 @@ class SubagentManager:
         last_usage: dict[str, Any] | None = None
 
         for _turn in range(max(1, config.max_turns)):
+            self._emit_status(job, f"Skill 子任务执行中：{job.label or job.agent_type}")
             model = llm.bind_tools([tool.to_schema() for tool in tools]) if tools else llm
             response = await asyncio.to_thread(model.invoke, messages)
             emitted.append(response)
@@ -262,6 +266,7 @@ class SubagentManager:
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
                 final_text = _message_text(response)
+                self._emit_status(job, f"Skill 子任务已完成：{job.label or job.agent_type}")
                 return SubagentResult(
                     success=True,
                     final_response=final_text,
@@ -277,6 +282,7 @@ class SubagentManager:
                         tool_map=tool_map,
                         tool_call=tool_call,
                         thread_id=job.thread_id,
+                        status_callback=job.status_callback,
                     )
                     for tool_call in tool_calls
                 )
@@ -307,6 +313,7 @@ class SubagentManager:
         tool_map: dict[str, Tool],
         tool_call: dict[str, Any],
         thread_id: str,
+        status_callback: Any | None = None,
     ) -> ToolMessage:
         name = str(tool_call.get("name") or "").strip()
         tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
@@ -325,6 +332,7 @@ class SubagentManager:
                 "graph": self._parent,
                 "thread_id": thread_id,
                 "subagent_depth": 1,
+                "status_callback": status_callback if callable(status_callback) else None,
             },
         }
         try:
@@ -334,6 +342,16 @@ class SubagentManager:
             logger.exception("Subagent tool execution failed: tool=%s", name)
             content = f"Tool execution failed: {type(exc).__name__}: {exc}"
         return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
+
+    @staticmethod
+    def _emit_status(job: SubagentJobRecord, text: str) -> None:
+        callback = job.status_callback if callable(job.status_callback) else None
+        if callback is None:
+            return
+        try:
+            callback(str(text))
+        except Exception:
+            logger.debug("Subagent status callback failed", exc_info=True)
 
     def _resolve_definition(self, agent_type: str) -> BuiltinSubagentDefinition:
         normalized = agent_type.strip().lower() if agent_type.strip() else "worker"

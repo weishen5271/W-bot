@@ -1,10 +1,12 @@
 """File system tools: read, write, edit, list."""
 
 import difflib
+import json
 import mimetypes
 from pathlib import Path
 from typing import Any
 
+from w_bot.agents.escalation import EscalationManager
 from w_bot.agents.tools.base import Tool
 from w_bot.utils.helpers import build_image_content_blocks, detect_image_mime
 
@@ -40,13 +42,63 @@ class _FsTool(Tool):
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
+        escalation_manager: EscalationManager | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
         self._extra_allowed_dirs = extra_allowed_dirs
+        self._escalation_manager = escalation_manager
 
-    def _resolve(self, path: str) -> Path:
-        return _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
+    def _resolve(
+        self,
+        path: str,
+        *,
+        tool_name: str,
+        tool_context: dict[str, Any] | None = None,
+        justification: str,
+        prefix_rule: list[str] | None = None,
+    ) -> Path | str:
+        session_id = str((tool_context or {}).get("thread_id") or "-").strip() or "-"
+        p = Path(path).expanduser()
+        if not p.is_absolute() and self._workspace:
+            p = self._workspace / p
+        resolved = p.resolve()
+        if self._allowed_dir:
+            all_dirs = [self._allowed_dir] + (self._extra_allowed_dirs or [])
+            if not any(_is_under(resolved, d) for d in all_dirs):
+                command = f"{tool_name} {resolved}"
+                if self._escalation_manager and self._escalation_manager.is_command_approved(
+                    session_id=session_id,
+                    command=command,
+                ):
+                    return resolved
+                if self._escalation_manager is not None:
+                    request = self._escalation_manager.create_request(
+                        session_id=session_id,
+                        command=command,
+                        working_dir=str((self._workspace or Path.cwd()).resolve()),
+                        justification=justification,
+                        prefix_rule=prefix_rule or [tool_name],
+                        risk_type="workspace_path",
+                    )
+                    payload = {
+                        "type": "escalation_request",
+                        "request_id": request.id,
+                        "session_id": request.session_id,
+                        "status": request.status,
+                        "risk_type": request.risk_type,
+                        "justification": request.justification,
+                        "command": request.command,
+                        "working_dir": request.working_dir,
+                        "prefix_rule": request.prefix_rule,
+                        "message": (
+                            f"操作需要提权审批。请求ID={request.id}。"
+                            "请让用户执行 /escalation 查看详情，并使用 /approve <请求ID> 或 /deny <请求ID> [原因]。"
+                        ),
+                    }
+                    return json.dumps(payload, ensure_ascii=False)
+                raise PermissionError(f"Path {path} is outside allowed directory {self._allowed_dir}")
+        return resolved
 
 
 class ReadFileTool(_FsTool):
@@ -77,7 +129,15 @@ class ReadFileTool(_FsTool):
         try:
             if not path:
                 return "Error reading file: Unknown path"
-            fp = self._resolve(path)
+            tool_context = kwargs.get("_wbot_tool_context") if isinstance(kwargs.get("_wbot_tool_context"), dict) else {}
+            fp = self._resolve(
+                path,
+                tool_name=self.name,
+                tool_context=tool_context,
+                justification="读取工作区外文件",
+            )
+            if isinstance(fp, str):
+                return fp
             if not fp.exists():
                 return f"Error: File not found: {path}"
             if not fp.is_file():
@@ -155,7 +215,15 @@ class WriteFileTool(_FsTool):
                 raise ValueError("Unknown path")
             if content is None:
                 raise ValueError("Unknown content")
-            fp = self._resolve(path)
+            tool_context = kwargs.get("_wbot_tool_context") if isinstance(kwargs.get("_wbot_tool_context"), dict) else {}
+            fp = self._resolve(
+                path,
+                tool_name=self.name,
+                tool_context=tool_context,
+                justification="写入工作区外文件",
+            )
+            if isinstance(fp, str):
+                return fp
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {fp}"
@@ -224,7 +292,15 @@ class EditFileTool(_FsTool):
             if new_text is None:
                 raise ValueError("Unknown new_text")
 
-            fp = self._resolve(path)
+            tool_context = kwargs.get("_wbot_tool_context") if isinstance(kwargs.get("_wbot_tool_context"), dict) else {}
+            fp = self._resolve(
+                path,
+                tool_name=self.name,
+                tool_context=tool_context,
+                justification="修改工作区外文件",
+            )
+            if isinstance(fp, str):
+                return fp
             if not fp.exists():
                 return f"Error: File not found: {path}"
 
@@ -300,7 +376,15 @@ class ListDirTool(_FsTool):
         try:
             if path is None:
                 raise ValueError("Unknown path")
-            dp = self._resolve(path)
+            tool_context = kwargs.get("_wbot_tool_context") if isinstance(kwargs.get("_wbot_tool_context"), dict) else {}
+            dp = self._resolve(
+                path,
+                tool_name=self.name,
+                tool_context=tool_context,
+                justification="列出工作区外目录",
+            )
+            if isinstance(dp, str):
+                return dp
             if not dp.exists():
                 return f"Error: Directory not found: {path}"
             if not dp.is_dir():
