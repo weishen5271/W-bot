@@ -48,6 +48,7 @@ class Settings:
     loop_guard: "LoopGuardSettings"
     enable_streaming: bool
     enable_console_logs: bool
+    restrict_to_workspace: bool
 
 
 @dataclass(frozen=True)
@@ -441,6 +442,12 @@ def load_settings(
             "enable_console_logs",
             default=True,
         ),
+        restrict_to_workspace=_bool_value(
+            merged,
+            "restrictToWorkspace",
+            "restrict_to_workspace",
+            default=False,
+        ),
         loop_guard=LoopGuardSettings(
             recursion_limit=_int_value(
                 loop_guard_payload,
@@ -569,6 +576,7 @@ def default_app_config() -> dict[str, Any]:
                 "compressLevel": 6,
             },
             "exposeStepLogs": True,
+            "restrictToWorkspace": False,
             "enableOpenClawProfile": True,
             "openClawProfileRootDir": DEFAULT_OPENCLAW_PROFILE_ROOT_DIR,
             "openClawAutoInit": True,

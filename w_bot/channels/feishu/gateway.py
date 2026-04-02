@@ -917,6 +917,7 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         escalation_manager=escalation_manager,
         skills_loader=skills_loader,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
+        restrict_to_workspace=settings.restrict_to_workspace,
     )
 
     short_term_memory_path = resolve_short_term_memory_path(settings.short_term_memory_path)

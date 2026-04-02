@@ -31,6 +31,7 @@ def build_tools(
     escalation_manager: EscalationManager | None = None,
     skills_loader: Any | None = None,
     extra_readonly_dirs: list[str] | None = None,
+    restrict_to_workspace: bool = False,
 ) -> list[Tool]:
     logger.info("Building tools for user_id=%s", user_id)
     _ = memory_store
@@ -41,34 +42,36 @@ def build_tools(
             readonly_roots.append(Path(candidate).resolve())
         except OSError:
             logger.warning("Skip invalid readonly root: %s", candidate)
+    allowed_dir = workspace_root if restrict_to_workspace else None
+    extra_allowed_dirs = readonly_roots[1:] if allowed_dir else None
 
     registry = ToolRegistry()
     registry.register(
         ReadFileTool(
             workspace=workspace_root,
-            allowed_dir=workspace_root,
-            extra_allowed_dirs=readonly_roots[1:],
+            allowed_dir=allowed_dir,
+            extra_allowed_dirs=extra_allowed_dirs,
             escalation_manager=escalation_manager,
         )
     )
     registry.register(
         WriteFileTool(
             workspace=workspace_root,
-            allowed_dir=workspace_root,
+            allowed_dir=allowed_dir,
             escalation_manager=escalation_manager,
         )
     )
     registry.register(
         EditFileTool(
             workspace=workspace_root,
-            allowed_dir=workspace_root,
+            allowed_dir=allowed_dir,
             escalation_manager=escalation_manager,
         )
     )
     registry.register(
         ListDirTool(
             workspace=workspace_root,
-            allowed_dir=workspace_root,
+            allowed_dir=allowed_dir,
             escalation_manager=escalation_manager,
         )
     )
@@ -84,7 +87,7 @@ def build_tools(
     registry.register(
         ExecTool(
             working_dir=str(workspace_root),
-            restrict_to_workspace=True,
+            restrict_to_workspace=restrict_to_workspace,
             escalation_manager=escalation_manager,
         )
     )

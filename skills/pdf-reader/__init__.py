@@ -1,1 +1,0 @@
-# PDF Reader Skill package

@@ -55,8 +55,8 @@ class ContextBuilder:
         if summary:
             blocks.append(
                 "# Skills\n\n"
-                "The following skills extend your capabilities. Prefer using the run_skill tool to execute a matching skill in an isolated subagent.\n"
-                "Only fall back to manually reading SKILL.md when you need to inspect or compare the skill definition first.\n"
+                "The following skills extend your capabilities. Prefer reading a matching SKILL.md with read_file and executing it in the current agent.\n"
+                "Use run_skill only when the user explicitly wants isolation, parallel/background execution, or when a delegated subagent is clearly beneficial.\n"
                 "Skills with available=\"false\" need dependencies installed first.\n\n"
                 f"{summary}"
             )

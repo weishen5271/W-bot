@@ -263,6 +263,7 @@ wbot sessions --config configs/app.json
 - `openClawAutoInit`：是否自动补齐档案
 - `loopGuard`：单轮工具调用与递归限制
 - `enableStreaming`：流式相关开关
+- `restrictToWorkspace`：是否将文件/命令工具限制在当前工作区内，默认 `false`
 - `enableConsoleLogs`：是否输出控制台日志
 
 注意：

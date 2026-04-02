@@ -263,6 +263,7 @@ Common fields:
 - `openClawAutoInit`: whether to auto-create missing profile files
 - `loopGuard`: recursion and tool-call limits
 - `enableStreaming`: streaming-related switch
+- `restrictToWorkspace`: whether to restrict file/command tools to the current workspace, default `false`
 - `enableConsoleLogs`: whether to print runtime logs to the console
 
 Note:

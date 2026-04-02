@@ -64,6 +64,7 @@
       "compressLevel": 6
     },
     "exposeStepLogs": true,
+    "restrictToWorkspace": false,
     "enableOpenClawProfile": true,
     "openClawProfileRootDir": "~/.wbot",
     "openClawAutoInit": true,

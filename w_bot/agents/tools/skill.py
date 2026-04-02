@@ -24,7 +24,7 @@ class RunSkillTool(Tool):
     def description(self) -> str:
         return (
             "Execute a named skill inside a forked subagent. "
-            "Use this when a skill matches the task and you want the skill to run in an isolated execution chain."
+            "Use this only when the user explicitly wants isolated, delegated, parallel, or background execution."
         )
 
     @property
