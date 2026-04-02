@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import select
+import sys
 import threading
 import time
 import traceback
@@ -36,32 +39,35 @@ from .tools.runtime import build_tools
 
 console = Console()
 logger = get_logger(__name__)
+_SAVED_TERM_ATTRS: Any = None
 
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.application import Application
-    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.enums import EditingMode
+    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.key_binding.key_processor import KeyPressEvent
     from prompt_toolkit.layout import Layout
     from prompt_toolkit.layout.containers import HSplit
+    from prompt_toolkit.patch_stdout import patch_stdout
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import Box, Button, Dialog, Frame, Label, TextArea
 except Exception:  # pragma: no cover - graceful fallback when dependency is unavailable
     PromptSession = None
     Application = None
-    AutoSuggestFromHistory = None
     FileHistory = None
     KeyBindings = None
     KeyPressEvent = Any
+    HTML = None
     Layout = None
     HSplit = None
     Dimension = None
     Style = None
+    patch_stdout = None
     Box = None
     Button = None
     Dialog = None
@@ -447,12 +453,14 @@ def _repl(
                 console.print(command_result.message)
             if command_result.should_exit:
                 logger.info("User requested exit")
+                _restore_terminal_state()
                 console.print("[bold yellow]Session closed.[/bold yellow]")
                 return
             continue
 
         if user_text.strip().lower() in {"quit", "exit"}:
             logger.info("User requested exit")
+            _restore_terminal_state()
             console.print("[bold yellow]Session closed.[/bold yellow]")
             return
 
@@ -917,23 +925,30 @@ class CliInputReader:
         self._settings = settings
         self._commands = commands
         self._app_state = app_state
+        _save_terminal_state()
         self._session = self._build_prompt_session()
 
     def read(self) -> str:
         if self._session is None:
             return input("\nYou > ")
         try:
-            return self._session.prompt()
+            _flush_pending_tty_input()
+            if patch_stdout is not None and HTML is not None:
+                with patch_stdout():
+                    return asyncio.run(
+                        self._session.prompt_async(HTML("<b fg='ansicyan'>You &gt;</b> "))
+                    )
+            return asyncio.run(self._session.prompt_async())
         except KeyboardInterrupt:
             return ""
         except EOFError:
+            _restore_terminal_state()
             return "exit"
 
     def _build_prompt_session(self) -> Any:
         if (
             PromptSession is None
             or FileHistory is None
-            or AutoSuggestFromHistory is None
             or KeyBindings is None
             or EditingMode is None
         ):
@@ -949,20 +964,66 @@ class CliInputReader:
             event.app.renderer.clear()
 
         return PromptSession(
-            message="\nYou > ",
-            completer=CliSlashCommandCompleter(self._commands),
-            complete_while_typing=True,
-            complete_in_thread=True,
-            reserve_space_for_menu=8,
-            auto_suggest=AutoSuggestFromHistory(),
             history=FileHistory(str(history_path)),
             key_bindings=bindings,
             enable_history_search=True,
+            enable_open_in_editor=False,
+            multiline=False,
             editing_mode=EditingMode.VI if self._app_state.vim_mode else EditingMode.EMACS,
         )
 
     def refresh(self) -> None:
         self._session = self._build_prompt_session()
+
+
+def _save_terminal_state() -> None:
+    global _SAVED_TERM_ATTRS
+    if _SAVED_TERM_ATTRS is not None:
+        return
+    try:
+        import termios
+
+        _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        _SAVED_TERM_ATTRS = None
+
+
+def _restore_terminal_state() -> None:
+    if _SAVED_TERM_ATTRS is None:
+        return
+    try:
+        import termios
+
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
+    except Exception:
+        return
+
+
+def _flush_pending_tty_input() -> None:
+    try:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+    except Exception:
+        return
+
+    try:
+        import termios
+
+        termios.tcflush(fd, termios.TCIFLUSH)
+        return
+    except Exception:
+        pass
+
+    try:
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                break
+            if not os.read(fd, 4096):
+                break
+    except Exception:
+        return
 
 def _resolve_prompt_history_path(settings: Settings) -> Path:
     session_state_path = Path(settings.session_state_file_path).expanduser()

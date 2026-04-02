@@ -23,7 +23,7 @@ dependencies = [
     "httpx>=0.28.0,<1.0.0",
     "ddgs>=9.5.5,<10.0.0",
     "readability-lxml>=0.8.4,<1.0.0",
-    "prompt-toolkit>=3.0.43,<4.0.0",
+    "prompt-toolkit>=3.0.50,<4.0.0",
 ]
 
 [tool.setuptools.packages.find]
