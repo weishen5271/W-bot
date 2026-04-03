@@ -1,0 +1,12 @@
+{
+  "name": "email-sender",
+  "version": "1.0.0",
+  "description": "Send emails via SMTP with flexible configuration options. Supports QQ Mail, Gmail, Outlook, and other SMTP services.",
+  "author": "W-bot",
+  "license": "MIT",
+  "tags": ["email", "smtp", "mail", "communication"],
+  "requires": {
+    "bins": ["python"],
+    "env": []
+  }
+}

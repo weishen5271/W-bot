@@ -306,7 +306,11 @@ def run_cli(
         mcp_servers=settings.mcp_servers,
         escalation_manager=escalation_manager,
         skills_loader=skills_loader,
-        extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
+        extra_readonly_dirs=(
+            [str(skills_loader.workspace_skills_dir), str(skills_loader.builtin_skills_dir)]
+            if skills_loader
+            else None
+        ),
         restrict_to_workspace=settings.restrict_to_workspace,
     )
 
@@ -1402,6 +1406,8 @@ def _cmd_skills(args: str, context: CliCommandContext) -> CliCommandResult:
         f"- path: {skill.path}",
         f"- available: {check.available}",
         f"- always: {skill.always}",
+        f"- allow_writes: {skill.allow_writes}",
+        f"- allow_exec: {skill.allow_exec}",
         f"- requires_bins: {', '.join(skill.requires_bins) if skill.requires_bins else '[none]'}",
         f"- requires_env: {', '.join(skill.requires_env) if skill.requires_env else '[none]'}",
     ]

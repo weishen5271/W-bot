@@ -916,7 +916,11 @@ def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
         mcp_servers=settings.mcp_servers,
         escalation_manager=escalation_manager,
         skills_loader=skills_loader,
-        extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
+        extra_readonly_dirs=(
+            [str(skills_loader.workspace_skills_dir), str(skills_loader.builtin_skills_dir)]
+            if skills_loader
+            else None
+        ),
         restrict_to_workspace=settings.restrict_to_workspace,
     )
 

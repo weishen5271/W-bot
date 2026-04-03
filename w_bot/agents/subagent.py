@@ -374,6 +374,18 @@ class SubagentManager:
         )
 
     def _build_skill_config(self, skill: SkillSpec) -> SubagentConfig:
+        disallowed_tools = [
+            "spawn",
+            "list_subagents",
+            "wait_subagent",
+            "run_skill",
+            "save_memory",
+        ]
+        if not skill.allow_writes:
+            disallowed_tools.extend(["write_file", "edit_file"])
+        if not skill.allow_exec:
+            disallowed_tools.append("exec")
+
         return SubagentConfig(
             agent_type=f"skill:{skill.name}",
             name=skill.name,
@@ -381,10 +393,13 @@ class SubagentManager:
             system_prompt=(
                 "You are executing a reusable skill in a forked subagent.\n"
                 "Follow the skill instructions carefully, use tools when needed, "
-                "and return a concise execution summary."
+                "and return a concise execution summary.\n"
+                "Default to read-only execution. Do not create local files, generate scripts, "
+                "or run shell commands unless the current skill has been explicitly granted "
+                "that capability and the delegated task truly requires it."
             ),
             allowed_tools=None,
-            disallowed_tools=["spawn", "list_subagents", "wait_subagent", "run_skill"],
+            disallowed_tools=disallowed_tools,
             max_turns=10,
         )
 

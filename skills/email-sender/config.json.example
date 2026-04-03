@@ -1,0 +1,10 @@
+{
+  "smtp_server": "smtp.qq.com",
+  "smtp_port": 465,
+  "username": "your_email@qq.com",
+  "password": "your_authorization_code",
+  "from_email": "your_email@qq.com",
+  "default_recipient": "recipient@example.com",
+  "security": "ssl",
+  "timeout": 30
+}

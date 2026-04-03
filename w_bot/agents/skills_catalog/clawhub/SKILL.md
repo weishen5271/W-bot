@@ -3,6 +3,8 @@ name: clawhub
 description: Use ClawHub CLI to search, install, update, and list skills in workspace.
 metadata: {"requires": {"bins": ["npx"], "env": []}, "always": false}
 always: false
+allow_writes: true
+allow_exec: true
 ---
 
 # ClawHub Skill

@@ -31,6 +31,8 @@ class SkillSpec:
     always: bool
     requires_bins: tuple[str, ...]
     requires_env: tuple[str, ...]
+    allow_writes: bool
+    allow_exec: bool
     content: str
 
 
@@ -154,9 +156,20 @@ class SkillsLoader:
 
         metadata = _parse_metadata(meta.get("metadata"))
         requires = metadata.get("requires") if isinstance(metadata.get("requires"), dict) else {}
+        permissions = metadata.get("permissions") if isinstance(metadata.get("permissions"), dict) else {}
         bins = _coerce_str_tuple(requires.get("bins"))
         env = _coerce_str_tuple(requires.get("env"))
         always = _coerce_bool(meta.get("always")) or _coerce_bool(metadata.get("always"))
+        allow_writes = (
+            _coerce_bool(meta.get("allow_writes"))
+            or _coerce_bool(metadata.get("allow_writes"))
+            or _coerce_bool(permissions.get("write"))
+        )
+        allow_exec = (
+            _coerce_bool(meta.get("allow_exec"))
+            or _coerce_bool(metadata.get("allow_exec"))
+            or _coerce_bool(permissions.get("exec"))
+        )
 
         return SkillSpec(
             name=name,
@@ -166,6 +179,8 @@ class SkillsLoader:
             always=always,
             requires_bins=bins,
             requires_env=env,
+            allow_writes=allow_writes,
+            allow_exec=allow_exec,
             content=body.strip(),
         )
 
