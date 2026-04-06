@@ -24,7 +24,7 @@ from .config import DEFAULT_APP_CONFIG_PATH, Settings, load_settings
 from .escalation import _render_escalation_request, EscalationManager, EscalationRequest
 from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
-from .memory import LongTermMemoryStore
+from ..memory.memory import LongTermMemoryStore
 from .openclaw_profile import OpenClawProfileLoader
 from .provider_factory import build_langchain_llm
 from .runtime_status import RuntimeStatusSnapshot
@@ -33,7 +33,7 @@ from .session_store import (
     SessionRecord,
     SessionStateStore,
 )
-from .skills import SkillsLoader
+from ..skills.skills import SkillsLoader
 from .streaming import (
     _latest_ai_reply_from_result,
     _message_to_text,
@@ -43,7 +43,7 @@ from .streaming import (
 from w_bot.utils.helpers import _shorten_text
 from .text_sanitizer import sanitize_user_text
 from .token_tracker import extract_token_usage
-from .tools.runtime import build_tools
+from ..tools.runtime import build_tools
 
 console = Console()
 logger = get_logger(__name__)

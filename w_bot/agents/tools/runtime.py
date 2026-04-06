@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..escalation import EscalationManager
-from ..logging_config import get_logger
-from ..memory import LongTermMemoryStore
+from ..core.escalation import EscalationManager
+from ..core.logging_config import get_logger
+from ..memory.memory import LongTermMemoryStore
 from .base import Tool
 from .cron import CronTool
 from .filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool

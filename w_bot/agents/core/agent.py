@@ -15,9 +15,10 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from .config import MultimodalSettings, TokenOptimizationSettings
+from .config import MultimodalSettings, TokenOptimizationSettings, IntentClassifierSettings
 from .context import ContextBuilder
-from .intent_detection import (
+from ..intent import IntentClassifier, ToolRegistry
+from ..intent.intent_detection import (
     _should_enable_tools_for_text,
     _should_check_completion_for_turn,
     _has_tool_messages_since_last_human,
@@ -37,7 +38,7 @@ from .intent_detection import (
     _contains_any,
 )
 from .logging_config import get_logger
-from .memory import LongTermMemoryStore
+from ..memory.memory import LongTermMemoryStore
 from .message_utils import (
     _extract_last_user_message,
     _merge_token_usage_dicts,
@@ -67,10 +68,10 @@ from .message_utils import (
     _recent_window_start,
     _messages_to_summary_text,
 )
-from .multimodal import MultimodalNormalizer, MultimodalRuntimeConfig, parse_human_payload
+from ..multimodal import MultimodalNormalizer, MultimodalRuntimeConfig, parse_human_payload
 from .openclaw_profile import OpenClawProfileLoader
-from .providers import resolve_provider_capabilities
-from .skills import SkillsLoader
+from ..providers import resolve_provider_capabilities
+from ..skills.skills import SkillsLoader
 from .streaming_utils import (
     _invoke_llm_with_optional_stream,
     _invoke_openai_compatible_direct_stream,
@@ -79,7 +80,7 @@ from .streaming_utils import (
     _to_stream_text_content,
     _to_stream_reasoning_content,
 )
-from .subagent import SubagentManager
+from ..skills.subagent import SubagentManager
 from .token_tracker import TokenBudgetManager, extract_token_usage, token_count_with_estimation
 from .tool_analysis import (
     _summarize_tool_calls,
@@ -303,6 +304,30 @@ class WBotGraph:
             workspace_root=Path.cwd().resolve(),
             skills_loader=skills_loader,
         )
+
+        # Initialize intent classifier
+        self._tools_registry = ToolRegistry(tools=list(self._tools_by_name.values()))
+        self._intent_classifier: IntentClassifier | None = None
+        if token_optimization_settings is not None:
+            # Build intent classifier settings from token optimization settings
+            # We create a default intent classifier settings here
+            # In production, this should be passed as a separate parameter
+            intent_cfg = IntentClassifierSettings(
+                enabled=True,
+                use_llm=True,
+                llm_model_name="",
+                llm_temperature=0.1,
+                llm_timeout_seconds=10.0,
+                confidence_threshold_heuristic=0.85,
+                confidence_threshold_llm=0.70,
+                enable_tool_exposure_control=True,
+                max_tools_per_intent=4,
+            )
+            self._intent_classifier = IntentClassifier(
+                llm=self._llm_plain,
+                settings=intent_cfg,
+                tools_registry=self._tools_registry,
+            )
 
         graph_builder = StateGraph(AgentState)
         graph_builder.add_node("retrieve_memories", self._retrieve_memories)
@@ -947,11 +972,18 @@ class WBotGraph:
         *,
         messages: list[AnyMessage],
     ) -> tuple[str, ...]:
+        latest_user_text = _extract_last_user_message(messages or history)
+
+        # Use new IntentClassifier if available
+        if self._intent_classifier is not None:
+            result = self._intent_classifier.classify_sync(latest_user_text, history)
+            return self._intent_classifier.select_tools_for_intent(result)
+
+        # Fallback: backward compatible logic
         tool_names = set(self._tools_by_name)
         if "run_skill" in tool_names:
-            latest_user_text = _extract_last_user_message(messages or history).lower()
-            if not _should_expose_run_skill(latest_user_text):
-                tool_names.remove("run_skill")
+            if not _should_expose_run_skill(latest_user_text.lower()):
+                tool_names.discard("run_skill")
         return tuple(sorted(tool_names))
 
     def _normalizer_for_current_turn(self, history: list[AnyMessage]) -> MultimodalNormalizer | None:

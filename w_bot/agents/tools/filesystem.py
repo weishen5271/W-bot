@@ -6,7 +6,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from w_bot.agents.escalation import EscalationManager
+from w_bot.agents.core.escalation import EscalationManager
 from w_bot.agents.tools.base import Tool
 from w_bot.utils.helpers import build_image_content_blocks, detect_image_mime
 

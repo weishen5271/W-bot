@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from w_bot.agents.logging_config import get_logger
+from w_bot.agents.core.logging_config import get_logger
 from w_bot.agents.tools.base import Tool
 from w_bot.agents.tools.common import http_get_json, http_post_json, sanitize_tool_token
 

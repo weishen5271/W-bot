@@ -11,7 +11,7 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import execute_values
 
-from .logging_config import get_logger
+from ..core.logging_config import get_logger
 
 logger = get_logger(__name__)
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from w_bot.agents.config import (
+from w_bot.agents.core.config import (
     DEFAULT_MESSAGES_FILE_PATH,
     LEGACY_MESSAGES_FILE_PATH,
     prefer_configs_path_with_legacy_fallback,

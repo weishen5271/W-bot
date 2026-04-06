@@ -57,6 +57,7 @@ class Settings:
     openclaw_profile_root_dir: str
     openclaw_auto_init: bool
     loop_guard: "LoopGuardSettings"
+    intent_classification: "IntentClassifierSettings"
     enable_streaming: bool
     enable_console_logs: bool
     restrict_to_workspace: bool
@@ -121,6 +122,21 @@ class LoopGuardSettings:
     max_same_tool_call_repeats: int
 
 
+@dataclass(frozen=True)
+class IntentClassifierSettings:
+    """Intent classification configuration."""
+
+    enabled: bool = True
+    use_llm: bool = True
+    llm_model_name: str = ""  # Empty = use primary model
+    llm_temperature: float = 0.1
+    llm_timeout_seconds: float = 10.0
+    confidence_threshold_heuristic: float = 0.85
+    confidence_threshold_llm: float = 0.70
+    enable_tool_exposure_control: bool = True
+    max_tools_per_intent: int = 4
+
+
 def load_settings(
     *,
     config_path: str = DEFAULT_APP_CONFIG_PATH,
@@ -161,6 +177,7 @@ def load_settings(
         else {}
     )
     loop_guard_payload = merged.get("loopGuard") if isinstance(merged.get("loopGuard"), dict) else {}
+    intent_class_payload = merged.get("intentClassification") if isinstance(merged.get("intentClassification"), dict) else {}
 
     default_session_state_path = prefer_configs_path_with_legacy_fallback(
         preferred_path=DEFAULT_SESSION_STATE_FILE_PATH,
@@ -488,6 +505,23 @@ def load_settings(
                 default=3,
             ),
         ),
+        intent_classification=IntentClassifierSettings(
+            enabled=_bool_value(intent_class_payload, "enabled", default=True),
+            use_llm=_bool_value(intent_class_payload, "useLlm", "use_llm", default=True),
+            llm_model_name=_string_value(intent_class_payload, "llmModelName", "llm_model_name", default=""),
+            llm_temperature=_float_value(intent_class_payload, "llmTemperature", "llm_temperature", default=0.1),
+            llm_timeout_seconds=_float_value(intent_class_payload, "llmTimeoutSeconds", "llm_timeout_seconds", default=10.0),
+            confidence_threshold_heuristic=_float_value(
+                intent_class_payload, "confidenceThresholdHeuristic", "confidence_threshold_heuristic", default=0.85
+            ),
+            confidence_threshold_llm=_float_value(
+                intent_class_payload, "confidenceThresholdLlm", "confidence_threshold_llm", default=0.70
+            ),
+            enable_tool_exposure_control=_bool_value(
+                intent_class_payload, "enableToolExposureControl", "enable_tool_exposure_control", default=True
+            ),
+            max_tools_per_intent=_int_value(intent_class_payload, "maxToolsPerIntent", "max_tools_per_intent", default=4),
+        ),
     )
     logger.info(
         "Settings loaded from %s: provider=%s, model=%s, session_id=%s, user_id=%s, memory_file=%s, top_k=%s",
@@ -604,6 +638,17 @@ def default_app_config() -> dict[str, Any]:
                 "recursionLimit": 20,
                 "maxToolStepsPerTurn": 8,
                 "maxSameToolCallRepeats": 3,
+            },
+            "intentClassification": {
+                "enabled": True,
+                "useLlm": True,
+                "llmModelName": "",
+                "llmTemperature": 0.1,
+                "llmTimeoutSeconds": 10.0,
+                "confidenceThresholdHeuristic": 0.85,
+                "confidenceThresholdLlm": 0.70,
+                "enableToolExposureControl": True,
+                "maxToolsPerIntent": 4,
             },
             "enableConsoleLogs": True,
         },

@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 from langchain_core.runnables import RunnableConfig
 
 from .logging_config import get_logger
-from .multimodal import MultimodalNormalizer, parse_human_payload
+from ..multimodal import MultimodalNormalizer, parse_human_payload
 from .token_tracker import extract_token_usage
 
 logger = get_logger(__name__)

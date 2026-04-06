@@ -7,7 +7,7 @@ from typing import Iterable
 
 from .config import TokenOptimizationSettings
 from .openclaw_profile import OpenClawProfileLoader
-from .skills import SkillsLoader
+from ..skills.skills import SkillsLoader
 
 
 class ContextBuilder:

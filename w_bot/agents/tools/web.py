@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from w_bot.agents.logging_config import get_logger
+from w_bot.agents.core.logging_config import get_logger
 from w_bot.agents.tools.base import Tool
 from w_bot.security.network import validate_resolved_url, validate_url_target
 from w_bot.utils.helpers import build_image_content_blocks

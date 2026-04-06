@@ -16,18 +16,18 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from w_bot.agents.agent import message_kind
-from w_bot.agents.agent import WBotGraph
-from w_bot.agents.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
-from w_bot.agents.escalation import EscalationManager, EscalationRequest
-from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
-from w_bot.agents.logging_config import get_logger, setup_logging
+from w_bot.agents.core.agent import message_kind
+from w_bot.agents.core.agent import WBotGraph
+from w_bot.agents.core.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
+from w_bot.agents.core.escalation import EscalationManager, EscalationRequest
+from w_bot.agents.core.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
+from w_bot.agents.core.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
-from w_bot.agents.openclaw_profile import OpenClawProfileLoader
-from w_bot.agents.provider_factory import build_langchain_llm
+from w_bot.agents.core.openclaw_profile import OpenClawProfileLoader
+from w_bot.agents.core.provider_factory import build_langchain_llm
 from w_bot.agents.skills import SkillsLoader
-from w_bot.agents.streaming import _latest_ai_reply_from_result, _message_to_text, StreamTextAssembler, latest_non_tool_ai_reply, normalize_display_text
-from w_bot.agents.text_sanitizer import sanitize_user_text
+from w_bot.agents.core.streaming import _latest_ai_reply_from_result, _message_to_text, StreamTextAssembler, latest_non_tool_ai_reply, normalize_display_text
+from w_bot.agents.core.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
 from w_bot.utils.helpers import _pick
 

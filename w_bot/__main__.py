@@ -4,14 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from w_bot.agents.config import (
+from w_bot.agents.core.config import (
     DEFAULT_APP_CONFIG_PATH,
     DEFAULT_OPENCLAW_PROFILE_ROOT_DIR,
     load_settings,
     normalize_openclaw_profile_root_dir,
 )
-from w_bot.agents.openclaw_profile import OpenClawProfileLoader
-from w_bot.agents.session_store import SessionStateStore
+from w_bot.agents.core.openclaw_profile import OpenClawProfileLoader
+from w_bot.agents.core.session_store import SessionStateStore
 
 
 def run_onboard(*, config_path: str = DEFAULT_APP_CONFIG_PATH, root_dir: str | None = None) -> None:
@@ -165,11 +165,11 @@ def main() -> None:
         for record in sessions:
             print(f"- {record.session_id} ({record.updated_at})")
     elif mode == "resume":
-        from w_bot.agents.cli import run_cli
+        from w_bot.agents.core.cli import run_cli
 
         run_cli(config_path=args.config, session_id=args.session_id)
     elif mode == "new":
-        from w_bot.agents.cli import run_cli
+        from w_bot.agents.core.cli import run_cli
 
         run_cli(
             config_path=args.config,
@@ -177,7 +177,7 @@ def main() -> None:
             force_new_session=True,
         )
     else:
-        from w_bot.agents.cli import run_cli
+        from w_bot.agents.core.cli import run_cli
 
         run_cli(
             config_path=getattr(args, "config", DEFAULT_APP_CONFIG_PATH),
