@@ -18,16 +18,17 @@ from langchain_core.messages import HumanMessage
 
 from w_bot.agents.agent import WBotGraph
 from w_bot.agents.config import default_app_config, load_settings
-from w_bot.agents.escalation import EscalationManager, EscalationRequest
+from w_bot.agents.escalation import _render_escalation_request_simple, EscalationManager, EscalationRequest
 from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.skills import SkillsLoader
-from w_bot.agents.streaming import latest_non_tool_ai_reply, normalize_display_text
+from w_bot.agents.streaming import _latest_ai_reply_from_result, _message_to_text, latest_non_tool_ai_reply, normalize_display_text
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
 from w_bot.channels.models import InboundMedia, InboundMessage
+from w_bot.utils.helpers import _pick
 
 logger = get_logger(__name__)
 
@@ -343,12 +344,12 @@ class FeishuGateway:
                 request = manager.get_request(query)
                 if request is None or request.session_id != session_id:
                     return f"未找到提权请求：{query}"
-                return self._render_escalation_request(request)
+                return _render_escalation_request_simple(request)
             status = None if query in {"", "all"} else query
             requests = manager.list_requests(session_id=session_id, status=status, limit=10)
             if not requests:
                 return "当前会话没有匹配的提权请求。"
-            return "\n\n".join(self._render_escalation_request(item) for item in requests)
+            return "\n\n".join(_render_escalation_request_simple(item) for item in requests)
         if command == "/approve":
             request_id = parts[1].strip() if len(parts) > 1 else ""
             if not request_id:
@@ -362,7 +363,7 @@ class FeishuGateway:
             if approved is None:
                 return f"批准提权请求失败：{request.id}"
             return (
-                self._render_escalation_request(approved)
+                _render_escalation_request_simple(approved)
                 + "\n\n已批准。请继续描述下一步，或直接让 agent 继续当前任务。"
             )
         if command == "/deny":
@@ -376,25 +377,8 @@ class FeishuGateway:
             denied = manager.deny_request(request_id=request_id, reason=reason)
             if denied is None:
                 return f"拒绝提权请求失败：{request_id}"
-            return self._render_escalation_request(denied)
+            return _render_escalation_request_simple(denied)
         return None
-
-    @staticmethod
-    def _render_escalation_request(request: EscalationRequest) -> str:
-        lines = [
-            f"提权请求: {request.id}",
-            f"状态: {request.status}",
-            f"风险类型: {request.risk_type}",
-            f"工作目录: {request.working_dir}",
-            f"命令: {request.command}",
-        ]
-        if request.justification:
-            lines.append(f"用途说明: {request.justification}")
-        if request.prefix_rule:
-            lines.append(f"授权前缀: {' '.join(request.prefix_rule)}")
-        if request.denial_reason:
-            lines.append(f"拒绝原因: {request.denial_reason}")
-        return "\n".join(lines)
 
     def _send_text(
         self,
@@ -1031,20 +1015,6 @@ def _build_llm(settings: Any, *, model_name: str) -> Any:
     return ChatOpenAI(**kwargs)
 
 
-def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
-    """处理pick相关逻辑并返回结果。
-    
-    Args:
-        data: 输入字典对象，用于按键名读取配置值。
-        keys: 候选键名列表，按顺序尝试读取。
-        default: 缺失配置时使用的默认值。
-    """
-    for key in keys:
-        if key in data:
-            return data[key]
-    return default
-
-
 def _coerce_list(value: Any) -> list[str]:
     """处理coerce/list相关逻辑并返回结果。
     
@@ -1161,33 +1131,6 @@ def _flatten_post_text(content: dict[str, Any]) -> str:
             if isinstance(txt, str) and txt.strip():
                 texts.append(txt.strip())
     return "\n".join(texts)
-
-
-def _message_to_text(content: Any) -> str:
-    """处理message/to/text相关逻辑并返回结果。
-    
-    Args:
-        content: 消息内容主体。
-    """
-    if isinstance(content, str):
-        return normalize_display_text(content)
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-            else:
-                parts.append(str(item))
-        return normalize_display_text("\n".join(part for part in parts if part))
-    return normalize_display_text(str(content))
-
-
-def _latest_ai_reply_from_result(result: Any) -> str:
-    values = result if isinstance(result, dict) else {}
-    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
-    return latest_non_tool_ai_reply(messages, content_to_text=_message_to_text)
 
 
 if __name__ == "__main__":

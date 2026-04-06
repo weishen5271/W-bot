@@ -25,6 +25,7 @@ from .providers import resolve_provider_capabilities
 from .skills import SkillsLoader
 from .subagent import SubagentManager
 from .token_tracker import TokenBudgetManager, extract_token_usage, token_count_with_estimation
+from w_bot.utils.helpers import _tool_result_to_text
 
 logger = get_logger(__name__)
 
@@ -2465,17 +2466,6 @@ def _looks_like_message_request(text: str) -> bool:
 
 def _looks_like_cron_request(text: str) -> bool:
     return _contains_any(text, ("cron", "定时", "schedule", "scheduled"))
-
-
-def _tool_result_to_text(result: Any) -> str:
-    if isinstance(result, str):
-        return result
-    if isinstance(result, (int, float, bool)) or result is None:
-        return str(result)
-    try:
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        return str(result)
 
 
 def _is_tool_failure_content(content: Any) -> bool:

@@ -17,6 +17,7 @@ from .skills import SkillSpec, SkillsLoader
 from .subagent_builtins import BUILTIN_SUBAGENTS, BuiltinSubagentDefinition
 from .tools.base import Tool
 from .tools.common import append_jsonl
+from w_bot.utils.helpers import _tool_result_to_text
 
 logger = get_logger(__name__)
 
@@ -451,17 +452,6 @@ class SubagentManager:
             "timestamp": _now_iso(),
         }
         append_jsonl(self._journal_path, payload)
-
-
-def _tool_result_to_text(result: Any) -> str:
-    if isinstance(result, str):
-        return result
-    if isinstance(result, (int, float, bool)) or result is None:
-        return str(result)
-    try:
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        return str(result)
 
 
 def _sanitize_context_messages(messages: list[BaseMessage]) -> list[BaseMessage]:

@@ -56,3 +56,34 @@ def latest_non_tool_ai_reply(
         if text:
             return text
     return ""
+
+
+def _message_to_text(content: Any) -> str:
+    """Convert message content to displayable text.
+
+    Handles str, list of blocks (dict with text), and dict formats.
+    """
+    if isinstance(content, str):
+        return normalize_display_text(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            else:
+                parts.append(str(item))
+        return normalize_display_text("\n".join(part for part in parts if part))
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return normalize_display_text(text)
+    return normalize_display_text(str(content))
+
+
+def _latest_ai_reply_from_result(result: Any) -> str:
+    """Extract the latest AI reply text from a graph invocation result."""
+    values = result if isinstance(result, dict) else {}
+    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
+    return latest_non_tool_ai_reply(messages, content_to_text=_message_to_text)

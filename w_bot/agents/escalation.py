@@ -13,6 +13,42 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def _render_escalation_request(request: EscalationRequest) -> str:
+    """Format an escalation request as a human-readable string with English labels."""
+    lines = [
+        f"[bold cyan]Escalation[/bold cyan]: {request.id}",
+        f"- status: {request.status}",
+        f"- risk_type: {request.risk_type}",
+        f"- working_dir: {request.working_dir}",
+        f"- command: {request.command}",
+    ]
+    if request.justification:
+        lines.append(f"- justification: {request.justification}")
+    if request.prefix_rule:
+        lines.append(f"- prefix_rule: {' '.join(request.prefix_rule)}")
+    if request.denial_reason:
+        lines.append(f"- denial_reason: {request.denial_reason}")
+    return "\n".join(lines)
+
+
+def _render_escalation_request_simple(request: EscalationRequest) -> str:
+    """Format an escalation request as a human-readable string with Chinese labels."""
+    lines = [
+        f"提权请求: {request.id}",
+        f"状态: {request.status}",
+        f"风险类型: {request.risk_type}",
+        f"工作目录: {request.working_dir}",
+        f"命令: {request.command}",
+    ]
+    if request.justification:
+        lines.append(f"用途说明: {request.justification}")
+    if request.prefix_rule:
+        lines.append(f"授权前缀: {' '.join(request.prefix_rule)}")
+    if request.denial_reason:
+        lines.append(f"拒绝原因: {request.denial_reason}")
+    return "\n".join(lines)
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 

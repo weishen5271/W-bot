@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 
@@ -35,3 +36,31 @@ def build_image_content_blocks(
             "image_url": {"url": f"data:{mime};base64,{encoded}"},
         },
     ]
+
+
+def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Try keys in order, return first match or default."""
+    for key in keys:
+        if key in data:
+            return data[key]
+    return default
+
+
+def _shorten_text(text: str, limit: int = 120) -> str:
+    """Truncate text to limit, preserving word boundaries when possible."""
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: max(0, limit - 3)]}..."
+
+
+def _tool_result_to_text(result: Any) -> str:
+    """Convert tool result to displayable string."""
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (int, float, bool)) or result is None:
+        return str(result)
+    try:
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        return str(result)

@@ -21,7 +21,7 @@ from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
 from .config import Settings, load_settings
-from .escalation import EscalationManager, EscalationRequest
+from .escalation import _render_escalation_request, EscalationManager, EscalationRequest
 from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
@@ -33,7 +33,8 @@ from .session_store import (
     SessionStateStore,
 )
 from .skills import SkillsLoader
-from .streaming import latest_non_tool_ai_reply, normalize_display_text
+from .streaming import _latest_ai_reply_from_result, _message_to_text, latest_non_tool_ai_reply, normalize_display_text
+from w_bot.utils.helpers import _shorten_text
 from .text_sanitizer import sanitize_user_text
 from .token_tracker import extract_token_usage
 from .tools.runtime import build_tools
@@ -459,30 +460,6 @@ def _repl(
         )
 
 
-def _shorten_text(text: str, limit: int = 120) -> str:
-    compact = " ".join(str(text or "").split())
-    if len(compact) <= limit:
-        return compact
-    return f"{compact[: max(0, limit - 3)]}..."
-
-
-def _render_escalation_request(request: EscalationRequest) -> str:
-    lines = [
-        f"[bold cyan]Escalation[/bold cyan]: {request.id}",
-        f"- status: {request.status}",
-        f"- risk_type: {request.risk_type}",
-        f"- working_dir: {request.working_dir}",
-        f"- command: {request.command}",
-    ]
-    if request.justification:
-        lines.append(f"- justification: {request.justification}")
-    if request.prefix_rule:
-        lines.append(f"- prefix_rule: {' '.join(request.prefix_rule)}")
-    if request.denial_reason:
-        lines.append(f"- denial_reason: {request.denial_reason}")
-    return "\n".join(lines)
-
-
 def _run_agent_turn(
     *,
     graph: Any,
@@ -819,34 +796,6 @@ def _render_existing_session_history(
         return
 
     console.print(f"[bold cyan]Restored {len(messages)} message(s) from previous session.[/bold cyan]")
-
-
-def _message_to_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return normalize_display_text(content)
-    if isinstance(content, list):
-        lines: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text":
-                text = str(block.get("text") or "").strip()
-                if text:
-                    lines.append(text)
-        if lines:
-            return normalize_display_text("\n".join(lines))
-    if isinstance(content, dict):
-        text = content.get("text")
-        if isinstance(text, str):
-            return normalize_display_text(text)
-    return normalize_display_text(str(content))
-
-
-def _latest_ai_reply_from_result(result: Any) -> str:
-    values = result if isinstance(result, dict) else {}
-    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
-    return latest_non_tool_ai_reply(messages, content_to_text=lambda content: _message_to_text(content))
 
 
 def _friendly_cli_phase(text: str) -> str:

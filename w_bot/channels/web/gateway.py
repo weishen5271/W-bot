@@ -25,9 +25,10 @@ from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.skills import SkillsLoader
-from w_bot.agents.streaming import StreamTextAssembler, latest_non_tool_ai_reply, normalize_display_text
+from w_bot.agents.streaming import _latest_ai_reply_from_result, _message_to_text, StreamTextAssembler, latest_non_tool_ai_reply, normalize_display_text
 from w_bot.agents.text_sanitizer import sanitize_user_text
 from w_bot.agents.tools.runtime import build_tools
+from w_bot.utils.helpers import _pick
 
 logger = get_logger(__name__)
 
@@ -568,13 +569,6 @@ def _build_llm(settings: Any, *, model_name: str) -> Any:
     return ChatOpenAI(**kwargs)
 
 
-def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
-    for key in keys:
-        if key in data:
-            return data[key]
-    return default
-
-
 def _safe_port(value: Any) -> int:
     try:
         port = int(value)
@@ -588,35 +582,8 @@ def _new_session_id(thread_prefix: str) -> str:
     return f"{prefix}:{int(time.time() * 1000)}"
 
 
-def _message_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return normalize_display_text(content)
-    if isinstance(content, list):
-        texts: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    texts.append(text.strip())
-        return normalize_display_text("\n".join(texts))
-    if isinstance(content, dict):
-        text = content.get("text")
-        if isinstance(text, str):
-            return normalize_display_text(text)
-        return normalize_display_text(str(content))
-    return normalize_display_text(str(content))
-
-
 def _sse_event(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
-
-
-def _latest_ai_reply_from_result(result: Any) -> str:
-    values = result if isinstance(result, dict) else {}
-    messages = values.get("messages", []) if isinstance(values.get("messages", []), list) else []
-    return latest_non_tool_ai_reply(messages, content_to_text=_message_to_text)
 
 
 def _chunk_text(text: str, *, size: int) -> list[str]:

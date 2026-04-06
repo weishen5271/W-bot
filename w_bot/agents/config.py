@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .logging_config import get_logger
+from w_bot.utils.helpers import _pick
 
 logger = get_logger(__name__)
 
@@ -654,19 +655,6 @@ def normalize_openclaw_profile_root_dir(value: str) -> str:
     if normalized in {"", "."}:
         return DEFAULT_OPENCLAW_PROFILE_ROOT_DIR
     return normalized
-
-
-def _pick(data: dict[str, Any], *keys: str) -> Any:
-    """处理pick相关逻辑并返回结果。
-    
-    Args:
-        data: 输入字典对象，用于按键名读取配置值。
-        keys: 候选键名列表，按顺序尝试读取。
-    """
-    for key in keys:
-        if key in data:
-            return data[key]
-    return None
 
 
 def _dict_value(data: dict[str, Any], *keys: str) -> dict[str, Any]:
