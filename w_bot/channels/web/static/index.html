@@ -332,9 +332,38 @@
   }
 
   function normalizeDisplayText(text) {
-    return String(text || "")
-      .replace(/\r\n?/g, "\n")
-      .replace(/\n{3,}/g, "\n\n");
+    const raw = String(text || "").replace(/\r\n/g, "\n");
+    const lines = [];
+    let buffer = [];
+    let cursor = 0;
+    let clearOnWrite = false;
+    for (const ch of raw) {
+      if (ch === "\r") {
+        cursor = 0;
+        clearOnWrite = true;
+        continue;
+      }
+      if (ch === "\n") {
+        lines.push(buffer.join("").replace(/[ \t]+$/g, ""));
+        buffer = [];
+        cursor = 0;
+        clearOnWrite = false;
+        continue;
+      }
+      if (clearOnWrite) {
+        buffer = [];
+        cursor = 0;
+        clearOnWrite = false;
+      }
+      if (cursor < buffer.length) {
+        buffer[cursor] = ch;
+      } else {
+        buffer.push(ch);
+      }
+      cursor += 1;
+    }
+    lines.push(buffer.join("").replace(/[ \t]+$/g, ""));
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
   function createAssistantCard() {

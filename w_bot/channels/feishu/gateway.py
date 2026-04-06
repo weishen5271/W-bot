@@ -17,7 +17,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from w_bot.agents.agent import WBotGraph
-from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
 from w_bot.agents.escalation import _render_escalation_request_simple, EscalationManager, EscalationRequest
 from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
@@ -851,7 +851,7 @@ class FeishuGateway:
         return {}
 
 
-def run_feishu_gateway(config_path: str = "configs/app.json") -> None:
+def run_feishu_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
     """启动飞书网关并开始处理入站消息。
     
     Args:
@@ -950,8 +950,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run W-bot Feishu gateway")
     parser.add_argument(
         "--config",
-        default="configs/app.json",
-        help="Path to gateway config JSON (default: configs/app.json)",
+        default=DEFAULT_APP_CONFIG_PATH,
+        help=f"Path to gateway config JSON (default: {DEFAULT_APP_CONFIG_PATH})",
     )
     args = parser.parse_args()
     run_feishu_gateway(config_path=args.config)

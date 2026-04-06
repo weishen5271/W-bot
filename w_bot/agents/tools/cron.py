@@ -6,6 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from w_bot.agents.config import (
+    DEFAULT_CRON_JOBS_FILE_PATH,
+    LEGACY_CRON_JOBS_FILE_PATH,
+    prefer_configs_path_with_legacy_fallback,
+)
 from w_bot.agents.tools.base import Tool
 from w_bot.agents.tools.common import read_json_file
 
@@ -14,7 +19,11 @@ class CronTool(Tool):
     """Tool to schedule reminders and recurring tasks."""
 
     def __init__(self, workspace_root: Path):
-        self._jobs_file = workspace_root / ".w_bot_cron_jobs.json"
+        jobs_file = prefer_configs_path_with_legacy_fallback(
+            preferred_path=DEFAULT_CRON_JOBS_FILE_PATH,
+            legacy_path=LEGACY_CRON_JOBS_FILE_PATH,
+        )
+        self._jobs_file = _resolve_with_workspace(workspace_root, jobs_file)
 
     @property
     def name(self) -> str:
@@ -80,3 +89,10 @@ class CronTool(Tool):
                 return f"Job {job_id} not found"
             return f"Removed job {job_id}"
         return f"Unknown action: {action}"
+
+
+def _resolve_with_workspace(workspace_root: Path, path: str) -> Path:
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = workspace_root / target
+    return target.resolve()

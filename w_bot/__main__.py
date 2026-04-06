@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from w_bot.agents.config import (
+    DEFAULT_APP_CONFIG_PATH,
     DEFAULT_OPENCLAW_PROFILE_ROOT_DIR,
     load_settings,
     normalize_openclaw_profile_root_dir,
@@ -13,7 +14,7 @@ from w_bot.agents.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.session_store import SessionStateStore
 
 
-def run_onboard(*, config_path: str = "configs/app.json", root_dir: str | None = None) -> None:
+def run_onboard(*, config_path: str = DEFAULT_APP_CONFIG_PATH, root_dir: str | None = None) -> None:
     target_root = root_dir
     if target_root is None:
         target_root = _resolve_profile_root_from_config(config_path) or DEFAULT_OPENCLAW_PROFILE_ROOT_DIR
@@ -62,7 +63,7 @@ def main() -> None:
     onboard_parser = subparsers.add_parser("onboard", help="Initialize workspace scaffold")
     onboard_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to app config JSON used to resolve workspace root",
     )
     onboard_parser.add_argument(
@@ -73,7 +74,7 @@ def main() -> None:
     agent_parser = subparsers.add_parser("agent", help="Run agent CLI mode")
     agent_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to app config JSON for agent mode",
     )
     agent_parser.add_argument(
@@ -89,7 +90,7 @@ def main() -> None:
     cli_parser = subparsers.add_parser("cli", help="Run agent CLI mode (legacy alias)")
     cli_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to app config JSON for agent mode",
     )
     cli_parser.add_argument(
@@ -105,7 +106,7 @@ def main() -> None:
     new_parser = subparsers.add_parser("new", help="Start CLI with a new session")
     new_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to app config JSON for agent mode",
     )
     new_parser.add_argument(
@@ -120,25 +121,25 @@ def main() -> None:
     )
     resume_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to app config JSON for agent mode",
     )
     sessions_parser = subparsers.add_parser("sessions", help="List recent CLI sessions")
     sessions_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to app config JSON for agent mode",
     )
     feishu_parser = subparsers.add_parser("feishu", help="Run Feishu gateway mode")
     feishu_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to config JSON for Feishu gateway",
     )
     web_parser = subparsers.add_parser("web", help="Run Web gateway mode")
     web_parser.add_argument(
         "--config",
-        default="configs/app.json",
+        default=DEFAULT_APP_CONFIG_PATH,
         help="Path to config JSON for Web gateway",
     )
 
@@ -179,7 +180,7 @@ def main() -> None:
         from w_bot.agents.cli import run_cli
 
         run_cli(
-            config_path=getattr(args, "config", "configs/app.json"),
+            config_path=getattr(args, "config", DEFAULT_APP_CONFIG_PATH),
             session_id=getattr(args, "session_id", None),
             force_new_session=bool(getattr(args, "new_session", False)),
         )

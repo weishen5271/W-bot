@@ -20,7 +20,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
-from .config import Settings, load_settings
+from .config import DEFAULT_APP_CONFIG_PATH, Settings, load_settings
 from .escalation import _render_escalation_request, EscalationManager, EscalationRequest
 from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
@@ -33,7 +33,13 @@ from .session_store import (
     SessionStateStore,
 )
 from .skills import SkillsLoader
-from .streaming import _latest_ai_reply_from_result, _message_to_text, latest_non_tool_ai_reply, normalize_display_text
+from .streaming import (
+    _latest_ai_reply_from_result,
+    _message_to_text,
+    StreamTextAssembler,
+    latest_non_tool_ai_reply,
+    normalize_display_text,
+)
 from w_bot.utils.helpers import _shorten_text
 from .text_sanitizer import sanitize_user_text
 from .token_tracker import extract_token_usage
@@ -119,19 +125,30 @@ class CliCommandContext:
 
 
 class CliThinkingSpinner:
-    def __init__(self, console_obj: Console, *, runtime_status: RuntimeStatusSnapshot | None = None) -> None:
+    def __init__(
+        self,
+        console_obj: Console,
+        *,
+        runtime_status: RuntimeStatusSnapshot | None = None,
+        enabled: bool = True,
+    ) -> None:
         self._console = console_obj
         self._runtime_status = runtime_status
+        self._enabled = enabled
         self._status = self._console.status("[dim]W-bot 正在思考...[/dim]", spinner="dots")
         self._active = False
 
     def start(self) -> None:
+        if not self._enabled:
+            return
         if self._active:
             return
         self._status.start()
         self._active = True
 
     def update(self, text: str) -> None:
+        if not self._enabled:
+            return
         if not self._active:
             return
         phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
@@ -139,6 +156,8 @@ class CliThinkingSpinner:
             self._status.update(f"[dim]{phase}[/dim]")
 
     def stop(self) -> None:
+        if not self._enabled:
+            return
         if not self._active:
             return
         self._status.stop()
@@ -156,9 +175,15 @@ class CliStreamRenderer:
         self._console = console_obj
         self._render_markdown = render_markdown
         self._runtime_status = runtime_status
-        self._spinner = CliThinkingSpinner(console_obj, runtime_status=runtime_status)
+        self._live_enabled = _supports_live_render(console_obj)
+        self._spinner = CliThinkingSpinner(
+            console_obj,
+            runtime_status=runtime_status,
+            enabled=self._live_enabled,
+        )
         self._spinner.start()
         self._buffer = ""
+        self._answer_assembler = StreamTextAssembler()
         self._live: Live | None = None
         self._last_refresh_at = 0.0
         self._last_token_at = time.monotonic()
@@ -188,13 +213,26 @@ class CliStreamRenderer:
 
     def on_delta(self, delta: Any) -> None:
         payload = delta
+        kind = "answer"
         if isinstance(delta, dict):
+            kind = str(delta.get("kind") or "answer").strip().lower() or "answer"
             payload = delta.get("text") or ""
+        if kind != "answer":
+            # CLI 默认只展示最终回答，避免将中间推理文本混入正文。
+            return
         payload = payload or ""
         if not payload:
             return
+        payload = self._answer_assembler.consume(str(payload))
+        if not payload:
+            return
         self._last_token_at = time.monotonic()
-        self._buffer = normalize_display_text(self._buffer + str(payload))
+        self._buffer = normalize_display_text(self._buffer + payload)
+        if not self._live_enabled:
+            # In non-interactive terminals (e.g. TERM=dumb), rich.Live redraws
+            # degrade into repeated appended lines. Keep collecting text and
+            # render once in finish().
+            return
         if self._live is None:
             if not self._buffer.strip():
                 return
@@ -254,8 +292,32 @@ class CliStreamRenderer:
         self._console.print(self._renderable(final=True))
         self._console.print()
 
+
+def _supports_live_render(console_obj: Console) -> bool:
+    if os.environ.get("WBOT_DISABLE_LIVE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    if os.environ.get("WBOT_FORCE_LIVE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    term = (os.environ.get("TERM") or "").strip().lower()
+    if term in {"", "dumb", "unknown"}:
+        return False
+    if os.environ.get("PYCHARM_HOSTED"):
+        return False
+    if not bool(getattr(console_obj, "is_terminal", False)):
+        return False
+    if not bool(getattr(console_obj, "is_interactive", False)):
+        return False
+    if getattr(console_obj, "color_system", None) is None:
+        return False
+    try:
+        if not sys.stdout.isatty():
+            return False
+    except Exception:
+        return False
+    return True
+
 def run_cli(
-    config_path: str = "configs/app.json",
+    config_path: str = DEFAULT_APP_CONFIG_PATH,
     *,
     session_id: str | None = None,
     force_new_session: bool = False,

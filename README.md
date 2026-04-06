@@ -249,7 +249,8 @@ wbot sessions --config configs/app.json
 
 - `memoryFilePath`：长期记忆文件，默认 `memory/MEMORY.md`
 - `shortTermMemoryPath`：短期记忆文件，默认 `memory/short_term_memory.pkl`
-- `sessionStateFilePath`：CLI 会话状态文件，默认 `.w_bot_session.json`
+- `sessionStateFilePath`：CLI 会话状态文件，默认 `configs/session_state.json`
+- `escalationStateFilePath`：提权请求状态文件，默认 `configs/escalations.json`
 - `retrieveTopK`：长期记忆检索条数
 - `enableCronService`：是否注册 Cron 工具
 - `mcpServers`：MCP 服务列表

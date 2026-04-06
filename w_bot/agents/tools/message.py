@@ -5,6 +5,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from w_bot.agents.config import (
+    DEFAULT_MESSAGES_FILE_PATH,
+    LEGACY_MESSAGES_FILE_PATH,
+    prefer_configs_path_with_legacy_fallback,
+)
 from w_bot.agents.tools.base import Tool
 from w_bot.agents.tools.common import append_jsonl
 
@@ -13,7 +18,11 @@ class MessageTool(Tool):
     """Tool to send messages to users on chat channels."""
 
     def __init__(self, workspace_root: Path):
-        self._workspace_root = workspace_root
+        outbox_path = prefer_configs_path_with_legacy_fallback(
+            preferred_path=DEFAULT_MESSAGES_FILE_PATH,
+            legacy_path=LEGACY_MESSAGES_FILE_PATH,
+        )
+        self._outbox_file = _resolve_with_workspace(workspace_root, outbox_path)
 
     @property
     def name(self) -> str:
@@ -46,6 +55,13 @@ class MessageTool(Tool):
             "media": media or [],
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
-        append_jsonl(self._workspace_root / ".w_bot_messages.jsonl", msg)
+        append_jsonl(self._outbox_file, msg)
         media_info = f" with {len(msg['media'])} attachments" if msg["media"] else ""
         return f"Message queued: id={msg['id']} recipient={msg['recipient']}{media_info}"
+
+
+def _resolve_with_workspace(workspace_root: Path, path: str) -> Path:
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = workspace_root / target
+    return target.resolve()

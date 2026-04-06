@@ -249,7 +249,8 @@ Common fields:
 
 - `memoryFilePath`: long-term memory file, default `memory/MEMORY.md`
 - `shortTermMemoryPath`: short-term memory file, default `memory/short_term_memory.pkl`
-- `sessionStateFilePath`: CLI session state file, default `.w_bot_session.json`
+- `sessionStateFilePath`: CLI session state file, default `configs/session_state.json`
+- `escalationStateFilePath`: escalation request state file, default `configs/escalations.json`
 - `retrieveTopK`: number of memory retrieval hits
 - `enableCronService`: whether to register cron tools
 - `mcpServers`: MCP server definitions

@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from w_bot.agents.agent import message_kind
 from w_bot.agents.agent import WBotGraph
-from w_bot.agents.config import default_app_config, load_settings
+from w_bot.agents.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
 from w_bot.agents.escalation import EscalationManager, EscalationRequest
 from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.logging_config import get_logger, setup_logging
@@ -93,7 +93,7 @@ class EscalationItemResponse(BaseModel):
     denial_reason: str
 
 
-def run_web_gateway(config_path: str = "configs/app.json") -> None:
+def run_web_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
     settings = load_settings(config_path=config_path)
     setup_logging(enable_console_logs=settings.enable_console_logs)
     cfg = load_gateway_config(config_path)
@@ -613,8 +613,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run W-bot Web gateway")
     parser.add_argument(
         "--config",
-        default="configs/app.json",
-        help="Path to gateway config JSON (default: configs/app.json)",
+        default=DEFAULT_APP_CONFIG_PATH,
+        help=f"Path to gateway config JSON (default: {DEFAULT_APP_CONFIG_PATH})",
     )
     args = parser.parse_args()
     run_web_gateway(config_path=args.config)

@@ -5,6 +5,41 @@ from typing import Any, Callable
 from langchain_core.messages import AIMessage
 
 
+def _normalize_control_chars(text: str | None) -> str:
+    raw = str(text or "")
+    if not raw:
+        return ""
+    # Keep CRLF as newline, then treat bare CR as "return to line start"
+    # with in-place overwrite semantics, matching terminal behavior.
+    raw = raw.replace("\r\n", "\n")
+    lines: list[str] = []
+    buffer: list[str] = []
+    cursor = 0
+    clear_on_write = False
+    for ch in raw:
+        if ch == "\r":
+            cursor = 0
+            clear_on_write = True
+            continue
+        if ch == "\n":
+            lines.append("".join(buffer))
+            buffer = []
+            cursor = 0
+            clear_on_write = False
+            continue
+        if clear_on_write:
+            buffer = []
+            cursor = 0
+            clear_on_write = False
+        if cursor < len(buffer):
+            buffer[cursor] = ch
+        else:
+            buffer.append(ch)
+        cursor += 1
+    lines.append("".join(buffer))
+    return "\n".join(line.rstrip() for line in lines)
+
+
 class StreamTextAssembler:
     def __init__(self) -> None:
         self._text = ""
@@ -14,7 +49,7 @@ class StreamTextAssembler:
         return self._text
 
     def consume(self, incoming_text: str | None) -> str:
-        payload = incoming_text or ""
+        payload = _normalize_control_chars(incoming_text)
         if not payload:
             return ""
         if not self._text:
@@ -37,8 +72,7 @@ class StreamTextAssembler:
 
 
 def normalize_display_text(text: str | None) -> str:
-    payload = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    payload = "\n".join(line.rstrip() for line in payload.split("\n"))
+    payload = _normalize_control_chars(text)
     while "\n\n\n" in payload:
         payload = payload.replace("\n\n\n", "\n\n")
     return payload

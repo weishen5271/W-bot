@@ -138,6 +138,10 @@ celerybeat.pid
 .env
 .envrc
 configs/app.json
+configs/session_state.json
+configs/escalations.json
+configs/cron_jobs.json
+configs/messages.jsonl
 .venv
 env/
 venv/

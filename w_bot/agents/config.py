@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,16 @@ from w_bot.utils.helpers import _pick
 
 logger = get_logger(__name__)
 
-DEFAULT_APP_CONFIG_PATH = "configs/app.json"
+DEFAULT_CONFIGS_DIR = "configs"
+DEFAULT_APP_CONFIG_PATH = f"{DEFAULT_CONFIGS_DIR}/app.json"
+DEFAULT_SESSION_STATE_FILE_PATH = f"{DEFAULT_CONFIGS_DIR}/session_state.json"
+DEFAULT_ESCALATION_STATE_FILE_PATH = f"{DEFAULT_CONFIGS_DIR}/escalations.json"
+DEFAULT_CRON_JOBS_FILE_PATH = f"{DEFAULT_CONFIGS_DIR}/cron_jobs.json"
+DEFAULT_MESSAGES_FILE_PATH = f"{DEFAULT_CONFIGS_DIR}/messages.jsonl"
+LEGACY_SESSION_STATE_FILE_PATH = ".w_bot_session.json"
+LEGACY_ESCALATION_STATE_FILE_PATH = ".w_bot_escalations.json"
+LEGACY_CRON_JOBS_FILE_PATH = ".w_bot_cron_jobs.json"
+LEGACY_MESSAGES_FILE_PATH = ".w_bot_messages.jsonl"
 DEFAULT_OPENCLAW_PROFILE_ROOT_DIR = "~/.wbot"
 
 
@@ -152,6 +162,15 @@ def load_settings(
     )
     loop_guard_payload = merged.get("loopGuard") if isinstance(merged.get("loopGuard"), dict) else {}
 
+    default_session_state_path = prefer_configs_path_with_legacy_fallback(
+        preferred_path=DEFAULT_SESSION_STATE_FILE_PATH,
+        legacy_path=LEGACY_SESSION_STATE_FILE_PATH,
+    )
+    default_escalation_state_path = prefer_configs_path_with_legacy_fallback(
+        preferred_path=DEFAULT_ESCALATION_STATE_FILE_PATH,
+        legacy_path=LEGACY_ESCALATION_STATE_FILE_PATH,
+    )
+
     settings = Settings(
         model_provider=model_provider,
         llm_api_key=_must_value(active_provider, "apiKey", "api_key"),
@@ -199,13 +218,13 @@ def load_settings(
             merged,
             "sessionStateFilePath",
             "session_state_file_path",
-            default=".w_bot_session.json",
+            default=default_session_state_path,
         ),
         escalation_state_file_path=_string_value(
             merged,
             "escalationStateFilePath",
             "escalation_state_file_path",
-            default=".w_bot_escalations.json",
+            default=default_escalation_state_path,
         ),
         retrieve_top_k=_int_value(merged, "retrieveTopK", "retrieve_top_k", default=4),
         enable_cron_service=_bool_value(
@@ -524,8 +543,8 @@ def default_app_config() -> dict[str, Any]:
             "shortTermMemoryPath": "memory/short_term_memory.pkl",
             "userId": "feishu_bot",
             "sessionId": "",
-            "sessionStateFilePath": ".w_bot_session.json",
-            "escalationStateFilePath": ".w_bot_escalations.json",
+            "sessionStateFilePath": DEFAULT_SESSION_STATE_FILE_PATH,
+            "escalationStateFilePath": DEFAULT_ESCALATION_STATE_FILE_PATH,
             "retrieveTopK": 4,
             "enableCronService": False,
             "mcpServers": [],
@@ -655,6 +674,36 @@ def normalize_openclaw_profile_root_dir(value: str) -> str:
     if normalized in {"", "."}:
         return DEFAULT_OPENCLAW_PROFILE_ROOT_DIR
     return normalized
+
+
+def prefer_configs_path_with_legacy_fallback(*, preferred_path: str, legacy_path: str) -> str:
+    preferred = _resolve_path(preferred_path)
+    legacy = _resolve_path(legacy_path)
+
+    if preferred.exists():
+        return preferred_path
+    if not legacy.exists():
+        return preferred_path
+
+    preferred.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(legacy, preferred)
+        logger.info("Migrated legacy runtime file: %s -> %s", legacy, preferred)
+        return preferred_path
+    except OSError:
+        logger.warning(
+            "Failed to migrate legacy runtime file from %s to %s, keep using legacy path",
+            legacy,
+            preferred,
+        )
+        return legacy_path
+
+
+def _resolve_path(path: str) -> Path:
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    return target
 
 
 def _dict_value(data: dict[str, Any], *keys: str) -> dict[str, Any]:
