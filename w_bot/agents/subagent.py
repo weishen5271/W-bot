@@ -457,7 +457,7 @@ class SubagentManager:
 def _sanitize_context_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     filtered = [message for message in messages if not isinstance(message, SystemMessage)]
     try:
-        from .agent import sanitize_messages_for_llm
+        from .message_utils import sanitize_messages_for_llm
 
         sanitized = sanitize_messages_for_llm(filtered)
         return [message for message in sanitized if not isinstance(message, SystemMessage)]

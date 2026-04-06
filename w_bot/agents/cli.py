@@ -26,6 +26,7 @@ from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_mem
 from .logging_config import get_logger, setup_logging
 from .memory import LongTermMemoryStore
 from .openclaw_profile import OpenClawProfileLoader
+from .provider_factory import build_langchain_llm
 from .runtime_status import RuntimeStatusSnapshot
 from .session_store import (
     RECENT_SESSIONS_LIMIT,
@@ -36,7 +37,6 @@ from .skills import SkillsLoader
 from .streaming import (
     _latest_ai_reply_from_result,
     _message_to_text,
-    StreamTextAssembler,
     latest_non_tool_ai_reply,
     normalize_display_text,
 )
@@ -183,7 +183,6 @@ class CliStreamRenderer:
         )
         self._spinner.start()
         self._buffer = ""
-        self._answer_assembler = StreamTextAssembler()
         self._live: Live | None = None
         self._last_refresh_at = 0.0
         self._last_token_at = time.monotonic()
@@ -207,7 +206,7 @@ class CliStreamRenderer:
 
     def _renderable(self, *, final: bool = False) -> Any:
         payload = normalize_display_text(self._buffer)
-        if self._render_markdown and payload:
+        if final and self._render_markdown and payload:
             return Markdown(payload)
         return Text(payload if payload or final else "")
 
@@ -223,11 +222,11 @@ class CliStreamRenderer:
         payload = payload or ""
         if not payload:
             return
-        payload = self._answer_assembler.consume(str(payload))
-        if not payload:
-            return
         self._last_token_at = time.monotonic()
-        self._buffer = normalize_display_text(self._buffer + payload)
+        # CLI token_callback receives incremental answer text from the
+        # streaming layer. Appending directly avoids swallowing legitimate
+        # repeated characters/phrases during rendering.
+        self._buffer = normalize_display_text(self._buffer + str(payload))
         if not self._live_enabled:
             # In non-interactive terminals (e.g. TERM=dumb), rich.Live redraws
             # degrade into repeated appended lines. Keep collecting text and
@@ -239,7 +238,12 @@ class CliStreamRenderer:
             self._spinner.stop()
             self._console.print()
             self._console.print("[bold cyan]W-bot[/bold cyan]")
-            self._live = Live(self._renderable(final=False), console=self._console, auto_refresh=False)
+            self._live = Live(
+                self._renderable(final=False),
+                console=self._console,
+                auto_refresh=False,
+                transient=True,
+            )
             self._live.start()
             self.stream_started = True
         self._refresh_live(force="\n" in payload)
@@ -278,10 +282,11 @@ class CliStreamRenderer:
         if self._live is not None:
             if final_payload and final_payload != self._buffer:
                 self._buffer = normalize_display_text(final_payload)
-            self._live.update(self._renderable(final=True))
+            self._live.update(self._renderable(final=False))
             self._live.refresh()
             self._live.stop()
             self._live = None
+            self._console.print(self._renderable(final=True))
             self._console.print()
             self._spinner.stop()
             return
@@ -415,21 +420,12 @@ def run_cli(
 
 def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
     """构建并返回目标对象。
-    
+
     Args:
         settings: 全局设置对象。
         model_name: 当前使用的模型名称。
     """
-    kwargs: dict[str, Any] = {
-        "model": model_name,
-        "api_key": settings.llm_api_key,
-        "base_url": settings.llm_base_url,
-        "temperature": settings.llm_temperature,
-        "streaming": True,
-    }
-    if settings.llm_extra_headers:
-        kwargs["default_headers"] = settings.llm_extra_headers
-    return ChatOpenAI(**kwargs)
+    return build_langchain_llm(settings, model_name=model_name, streaming=True)
 
 
 def _repl(
@@ -592,7 +588,7 @@ def _run_agent_turn(
     if app_state.runtime_status is not None:
         app_state.runtime_status.set_phase("rendering", "整理结果中", recent_action="汇总本轮输出")
         app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
-    renderer.finish("" if renderer.stream_started else latest_ai_text)
+    renderer.finish(latest_ai_text)
     if app_state.runtime_status is not None:
         app_state.runtime_status.set_phase("idle", "空闲", recent_action="等待下一条输入")
         _persist_session_snapshot(session_store=session_store, app_state=app_state)
@@ -923,6 +919,17 @@ class CliInputReader:
         _save_terminal_state()
         self._session = self._build_prompt_session()
 
+    def _run_coro(self, coro):
+        """Run coroutine, reusing existing loop if available."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
+
     def read(self) -> str:
         if self._session is None:
             return input("\nYou: ")
@@ -930,10 +937,10 @@ class CliInputReader:
             _flush_pending_tty_input()
             if patch_stdout is not None and HTML is not None:
                 with patch_stdout():
-                    return asyncio.run(
+                    return self._run_coro(
                         self._session.prompt_async(HTML("<b fg='ansicyan'>You:</b> "))
                     )
-            return asyncio.run(self._session.prompt_async())
+            return self._run_coro(self._session.prompt_async())
         except KeyboardInterrupt:
             return ""
         except EOFError:

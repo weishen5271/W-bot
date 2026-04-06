@@ -23,6 +23,7 @@ from w_bot.agents.file_checkpointer import WorkspaceFileCheckpointer, resolve_sh
 from w_bot.agents.logging_config import get_logger, setup_logging
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.openclaw_profile import OpenClawProfileLoader
+from w_bot.agents.provider_factory import build_langchain_llm
 from w_bot.agents.skills import SkillsLoader
 from w_bot.agents.streaming import _latest_ai_reply_from_result, _message_to_text, latest_non_tool_ai_reply, normalize_display_text
 from w_bot.agents.text_sanitizer import sanitize_user_text
@@ -997,22 +998,12 @@ def _write_default_config(target: Path) -> None:
 
 def _build_llm(settings: Any, *, model_name: str) -> Any:
     """构建并返回目标对象。
-    
+
     Args:
         settings: 全局设置对象。
         model_name: 当前使用的模型名称。
     """
-    from langchain_openai import ChatOpenAI
-
-    kwargs: dict[str, Any] = {
-        "model": model_name,
-        "api_key": settings.llm_api_key,
-        "base_url": settings.llm_base_url,
-        "temperature": settings.llm_temperature,
-    }
-    if settings.llm_extra_headers:
-        kwargs["default_headers"] = settings.llm_extra_headers
-    return ChatOpenAI(**kwargs)
+    return build_langchain_llm(settings, model_name=model_name, streaming=True)
 
 
 def _coerce_list(value: Any) -> list[str]:

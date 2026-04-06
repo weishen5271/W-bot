@@ -67,6 +67,16 @@ class StreamTextAssembler:
                 delta = payload[size:]
                 self._text += delta
                 return delta
+        # No overlap found - this might indicate a problem in streaming
+        # Log for debugging
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.warning(
+            "StreamTextAssembler: no overlap found. self._text=%r, payload=%r, payload_len=%d",
+            self._text[:100] if self._text else "",
+            payload[:100],
+            len(payload)
+        )
         self._text += payload
         return payload
 

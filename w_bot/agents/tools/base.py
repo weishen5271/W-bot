@@ -53,7 +53,15 @@ class Tool(ABC):
         return await self.execute(**normalized)
 
     def invoke(self, params: dict[str, Any] | None = None) -> Any:
-        return asyncio.run(self.ainvoke(params))
+        try:
+            asyncio.get_running_loop()
+            # Already in async context - run in thread pool to avoid blocking
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, self.ainvoke(params))
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(self.ainvoke(params))
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
         schema = self.parameters or {}
