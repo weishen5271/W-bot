@@ -1,5 +1,8 @@
 """MCP tool wrappers for HTTP-discovered tools."""
 
+from __future__ import annotations
+
+import asyncio
 import json
 from typing import Any
 
@@ -11,6 +14,8 @@ logger = get_logger(__name__)
 
 
 class MCPToolWrapper(Tool):
+    """MCP tool with retry, timeout, and error handling."""
+
     def __init__(
         self,
         *,
@@ -20,6 +25,10 @@ class MCPToolWrapper(Tool):
         invoke_path_template: str,
         remote_tool_name: str,
         headers: dict[str, Any],
+        timeout: int = 20,
+        retry_enabled: bool = True,
+        max_attempts: int = 3,
+        backoff_ms: int = 500,
     ):
         self._name = full_name
         self._description = description
@@ -27,6 +36,10 @@ class MCPToolWrapper(Tool):
         self._invoke_path_template = invoke_path_template
         self._remote_tool_name = remote_tool_name
         self._headers = headers
+        self._timeout = timeout
+        self._retry_enabled = retry_enabled
+        self._max_attempts = max_attempts
+        self._backoff_ms = backoff_ms
 
     @property
     def name(self) -> str:
@@ -46,6 +59,26 @@ class MCPToolWrapper(Tool):
         }
 
     async def execute(self, arguments_json: str = "{}", **kwargs: Any) -> str:
+        attempts = self._max_attempts if self._retry_enabled else 1
+
+        for attempt in range(attempts):
+            try:
+                return await self._execute_once(arguments_json)
+            except Exception as e:
+                if attempt < attempts - 1:
+                    wait_ms = self._backoff_ms * (2 ** attempt)
+                    logger.warning(
+                        "MCP tool %s failed (attempt %d/%d), retrying in %dms: %s",
+                        self._name, attempt + 1, attempts, wait_ms, e
+                    )
+                    await asyncio.sleep(wait_ms / 1000)
+                else:
+                    logger.error("MCP tool %s failed after %d attempts: %s", self._name, attempts, e)
+                    return f"Error: {str(e)}"
+
+        return "Error: Max retries exceeded"
+
+    async def _execute_once(self, arguments_json: str) -> str:
         try:
             arguments = json.loads(arguments_json or "{}")
         except json.JSONDecodeError:
@@ -53,7 +86,17 @@ class MCPToolWrapper(Tool):
 
         path = self._invoke_path_template.replace("{tool}", self._remote_tool_name)
         url = f"{self._base_url}{path}"
-        raw = http_post_json(url=url, payload={"arguments": arguments}, headers=self._headers, timeout=20)
+
+        # Support both sync and async HTTP
+        if asyncio.get_event_loop().is_running():
+            # Run in thread pool if already in async context
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: http_post_json(url=url, payload={"arguments": arguments}, headers=self._headers, timeout=self._timeout)
+            )
+        else:
+            raw = http_post_json(url=url, payload={"arguments": arguments}, headers=self._headers, timeout=self._timeout)
+
         if isinstance(raw, str):
             return raw
         return json.dumps(raw, ensure_ascii=False)
@@ -68,13 +111,26 @@ def build_mcp_tools(mcp_servers: list[dict[str, Any]]) -> list[Tool]:
             continue
 
         server_name = sanitize_tool_token(str(server.get("name") or "server"))
-        base_url = str(server.get("base_url") or "").strip().rstrip("/")
+        base_url = str(server.get("baseUrl") or server.get("base_url") or "").strip().rstrip("/")
         if not base_url:
             continue
 
-        discovery_path = str(server.get("discovery_path") or "/tools")
-        invoke_path_template = str(server.get("invoke_path_template") or "/tools/{tool}")
+        discovery_path = str(server.get("discoveryPath") or server.get("discovery_path") or "/tools")
+        invoke_path_template = str(server.get("invokePathTemplate") or server.get("invoke_path_template") or "/tools/{tool}")
         headers = server.get("headers") if isinstance(server.get("headers"), dict) else {}
+
+        # Parse timeout
+        timeout = server.get("timeout", 20)
+        if not isinstance(timeout, int):
+            timeout = 20
+
+        # Parse retry config
+        retry_config = server.get("retry", {})
+        if not isinstance(retry_config, dict):
+            retry_config = {}
+        retry_enabled = retry_config.get("enabled", True) if retry_config else True
+        max_attempts = retry_config.get("maxAttempts", retry_config.get("max_attempts", 3))
+        backoff_ms = retry_config.get("backoffMs", retry_config.get("backoff_ms", 500))
 
         discovered = discover_mcp_tools(base_url=base_url, discovery_path=discovery_path, headers=headers)
         for item in discovered:
@@ -89,6 +145,10 @@ def build_mcp_tools(mcp_servers: list[dict[str, Any]]) -> list[Tool]:
                     invoke_path_template=invoke_path_template,
                     remote_tool_name=item.get("name", tool_name),
                     headers=headers,
+                    timeout=timeout,
+                    retry_enabled=retry_enabled,
+                    max_attempts=max_attempts,
+                    backoff_ms=backoff_ms,
                 )
             )
     return tools

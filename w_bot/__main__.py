@@ -143,6 +143,72 @@ def main() -> None:
         help="Path to config JSON for Web gateway",
     )
 
+    # MCP server management
+    mcp_parser = subparsers.add_parser("mcp", help="MCP server management")
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command")
+
+    # mcp list
+    mcp_list_parser = mcp_subparsers.add_parser("list", help="List MCP servers")
+    mcp_list_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp add
+    mcp_add_parser = mcp_subparsers.add_parser("add", help="Add MCP server")
+    mcp_add_parser.add_argument("--name", required=True)
+    mcp_add_parser.add_argument("--url", required=True)
+    mcp_add_parser.add_argument("--transport", default="http", choices=["http", "sse", "streamable-http"])
+    mcp_add_parser.add_argument("--discovery-path", default="/tools")
+    mcp_add_parser.add_argument("--invoke-path", default="/tools/{tool}")
+    mcp_add_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp remove
+    mcp_remove_parser = mcp_subparsers.add_parser("remove", help="Remove MCP server")
+    mcp_remove_parser.add_argument("--name", required=True)
+    mcp_remove_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp discover
+    mcp_discover_parser = mcp_subparsers.add_parser("discover", help="Discover MCP tools")
+    mcp_discover_parser.add_argument("--name", default=None)
+    mcp_discover_parser.add_argument("--json-output", action="store_true")
+    mcp_discover_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp test
+    mcp_test_parser = mcp_subparsers.add_parser("test", help="Test MCP server")
+    mcp_test_parser.add_argument("--name", required=True)
+    mcp_test_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp health
+    mcp_health_parser = mcp_subparsers.add_parser("health", help="Health check")
+    mcp_health_parser.add_argument("--name", default=None)
+    mcp_health_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp healthd
+    mcp_healthd_parser = mcp_subparsers.add_parser("healthd", help="Run health check daemon")
+    mcp_healthd_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+    mcp_healthd_parser.add_argument("--interval", default=30, type=int)
+
+    # mcp start
+    mcp_start_parser = mcp_subparsers.add_parser("start", help="Start MCP server")
+    mcp_start_parser.add_argument("--name", required=True)
+    mcp_start_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp stop
+    mcp_stop_parser = mcp_subparsers.add_parser("stop", help="Stop MCP server")
+    mcp_stop_parser.add_argument("--name", required=True)
+    mcp_stop_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp restart
+    mcp_restart_parser = mcp_subparsers.add_parser("restart", help="Restart MCP server")
+    mcp_restart_parser.add_argument("--name", required=True)
+    mcp_restart_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
+    # mcp add-stdio
+    mcp_add_stdio_parser = mcp_subparsers.add_parser("add-stdio", help="Add stdio MCP server")
+    mcp_add_stdio_parser.add_argument("--name", required=True)
+    mcp_add_stdio_parser.add_argument("--command", required=True)
+    mcp_add_stdio_parser.add_argument("--args", default="")
+    mcp_add_stdio_parser.add_argument("--env", default="")
+    mcp_add_stdio_parser.add_argument("--config", default=DEFAULT_APP_CONFIG_PATH)
+
     args = parser.parse_args()
     mode = args.mode or "agent"
     if mode == "onboard":
@@ -164,6 +230,33 @@ def main() -> None:
         print("Recent CLI sessions:")
         for record in sessions:
             print(f"- {record.session_id} ({record.updated_at})")
+    elif mode == "mcp":
+        from w_bot.agents.mcp.cli import (
+            run_mcp_command,
+            health_daemon,
+            start_server,
+            stop_server,
+            restart_server,
+            add_stdio_server,
+        )
+        if args.mcp_command == "healthd":
+            health_daemon.callback(config=args.config, interval=args.interval)
+        elif args.mcp_command == "start":
+            start_server.callback(config=args.config, name=args.name)
+        elif args.mcp_command == "stop":
+            stop_server.callback(config=args.config, name=args.name)
+        elif args.mcp_command == "restart":
+            restart_server.callback(config=args.config, name=args.name)
+        elif args.mcp_command == "add-stdio":
+            add_stdio_server.callback(
+                config=args.config,
+                name=args.name,
+                command=args.command,
+                args=args.args,
+                env=args.env,
+            )
+        else:
+            run_mcp_command(args)
     elif mode == "resume":
         from w_bot.agents.core.cli import run_cli
 
