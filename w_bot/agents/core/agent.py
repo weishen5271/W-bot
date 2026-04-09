@@ -59,6 +59,7 @@ from .message_utils import (
     _is_messages_length_error,
     _resolve_stream_token_callback,
     _resolve_status_callback,
+    _resolve_tool_progress_callback,
     _resolve_debug_callback,
     _emit_status,
     _resolve_thread_id,
@@ -102,6 +103,122 @@ logger = get_logger(__name__)
 
 _RUNTIME_TOKEN_CALLBACK: Callable[[str], None] | None = None
 _RUNTIME_DEBUG_CALLBACK: Callable[[str], None] | None = None
+
+
+def _tool_args_preview(tool_name: str, args: dict[str, Any]) -> str:
+    candidates = [
+        args.get("url"),
+        args.get("query"),
+        args.get("path"),
+        args.get("command"),
+        args.get("task"),
+        args.get("id"),
+        args.get("working_dir"),
+    ]
+    for item in candidates:
+        text = str(item or "").strip()
+        if text:
+            compact = " ".join(text.split())
+            return compact[:96] + ("..." if len(compact) > 96 else "")
+    if not args:
+        return tool_name
+    try:
+        raw = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        raw = str(args)
+    compact = " ".join(raw.split())
+    return compact[:96] + ("..." if len(compact) > 96 else "")
+
+
+def _tool_progress_emoji(tool_name: str) -> str:
+    normalized = (tool_name or "").strip().lower()
+    if any(token in normalized for token in ["browser", "navigate", "web"]):
+        return "🌐"
+    if any(token in normalized for token in ["search", "grep", "find"]):
+        return "🔎"
+    if any(token in normalized for token in ["read", "fetch", "load"]):
+        return "📖"
+    if any(token in normalized for token in ["write", "edit", "patch"]):
+        return "✍"
+    if any(token in normalized for token in ["exec", "shell", "command"]):
+        return "⚙"
+    if any(token in normalized for token in ["spawn", "subagent", "wait"]):
+        return "🧩"
+    return "⚡"
+
+
+def _tool_progress_action(tool_name: str) -> str:
+    normalized = (tool_name or "").strip().lower()
+    for token, label in [
+        ("navigate", "navigate"),
+        ("search", "search"),
+        ("fetch", "fetch"),
+        ("read", "read"),
+        ("write", "write"),
+        ("edit", "edit"),
+        ("exec", "exec"),
+        ("shell", "exec"),
+        ("spawn", "spawn"),
+        ("wait", "wait"),
+    ]:
+        if token in normalized:
+            return label
+    compact = normalized.replace("mcp_", "").replace("_tool", "")
+    return compact[:18] if compact else "run"
+
+
+def _tool_progress_line(
+    *,
+    event_type: str,
+    tool_name: str,
+    preview: str,
+    elapsed_seconds: float | None,
+    ok: bool | None,
+) -> str:
+    if event_type == "tool.started":
+        return f"  ┊ ⚡ preparing {tool_name}..."
+    label = " ".join((preview or tool_name).split())
+    if len(label) > 88:
+        label = label[:85] + "..."
+    duration = f"  {elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
+    suffix = " [error]" if ok is False else ""
+    return f"  ┊ {_tool_progress_emoji(tool_name)} {_tool_progress_action(tool_name)}  {label}{duration}{suffix}"
+
+
+def _emit_tool_progress(
+    config: RunnableConfig | None,
+    *,
+    event_type: str,
+    tool_name: str,
+    preview: str = "",
+    elapsed_seconds: float | None = None,
+    ok: bool | None = None,
+    function_args: dict[str, Any] | None = None,
+) -> None:
+    callback = _resolve_tool_progress_callback(config)
+    if callback is not None:
+        try:
+            callback(
+                event_type,
+                tool_name,
+                preview,
+                function_args or {},
+                elapsed_seconds=elapsed_seconds,
+                ok=ok,
+            )
+            return
+        except Exception:
+            logger.debug("Tool progress callback failed", exc_info=True)
+    _emit_status(
+        config,
+        _tool_progress_line(
+            event_type=event_type,
+            tool_name=tool_name,
+            preview=preview,
+            elapsed_seconds=elapsed_seconds,
+            ok=ok,
+        ),
+    )
 
 
 def set_runtime_callbacks(
@@ -181,6 +298,7 @@ class ScheduledGraphApp:
         label: str = "",
         context_messages: list[AnyMessage] | None = None,
         parent_thread_id: str = "-",
+        status_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         return self._owner.spawn_subagent(
             agent_type=agent_type,
@@ -188,6 +306,7 @@ class ScheduledGraphApp:
             label=label,
             context_messages=context_messages,
             parent_thread_id=parent_thread_id,
+            status_callback=status_callback,
         )
 
     def __getattr__(self, item: str) -> Any:
@@ -369,6 +488,7 @@ class WBotGraph:
         label: str = "",
         context_messages: list[AnyMessage] | None = None,
         parent_thread_id: str = "-",
+        status_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         return self._subagent_manager.spawn(
             agent_type=agent_type,
@@ -376,6 +496,7 @@ class WBotGraph:
             label=label,
             context_messages=context_messages,
             parent_thread_id=parent_thread_id,
+            status_callback=status_callback,
         )
 
     def list_subagents(self, *, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -722,12 +843,22 @@ class WBotGraph:
                 args = tool_call.get("arguments")
             if not isinstance(args, dict):
                 args = {}
+            preview = _tool_args_preview(name, args)
+            _emit_tool_progress(
+                config,
+                event_type="tool.started",
+                tool_name=name,
+                preview=preview,
+                function_args=args,
+            )
+            started_at = time.monotonic()
             try:
                 tool_context = {
                     "graph": self,
                     "state_messages": list(messages),
                     "config": config,
                     "status_callback": _resolve_status_callback(config),
+                    "tool_progress_callback": _resolve_tool_progress_callback(config),
                     "thread_id": _resolve_thread_id(config),
                     "subagent_depth": 0,
                 }
@@ -742,6 +873,16 @@ class WBotGraph:
             except Exception as exc:
                 logger.exception("Tool execution failed: %s", name)
                 content = f"Tool execution failed: {type(exc).__name__}: {exc}"
+            elapsed_seconds = time.monotonic() - started_at
+            _emit_tool_progress(
+                config,
+                event_type="tool.completed",
+                tool_name=name,
+                preview=preview,
+                elapsed_seconds=elapsed_seconds,
+                ok=not _is_tool_failure_content(content),
+                function_args=args,
+            )
             return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
 
         _emit_status(config, f"工具并发执行中：{_summarize_tool_calls(last.tool_calls)}")
@@ -1226,5 +1367,3 @@ class WBotGraph:
             thread_id,
             optimized["summarized_message_count"],
         )
-
-

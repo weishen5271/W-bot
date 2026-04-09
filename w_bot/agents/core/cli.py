@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import select
 import sys
@@ -14,9 +15,12 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
@@ -54,7 +58,7 @@ try:
     from prompt_toolkit.application import Application
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.enums import EditingMode
-    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.formatted_text import HTML, FormattedText
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.key_binding.key_processor import KeyPressEvent
@@ -71,6 +75,7 @@ except Exception:  # pragma: no cover - graceful fallback when dependency is una
     KeyBindings = None
     KeyPressEvent = Any
     HTML = None
+    FormattedText = None
     Layout = None
     HSplit = None
     Dimension = None
@@ -89,8 +94,12 @@ except Exception:  # pragma: no cover - graceful fallback when dependency is una
 @dataclass
 class CliAppState:
     session_id: str
+    current_model: str = ""
+    workspace_root: str = ""
+    session_started_at: float = field(default_factory=time.monotonic)
     last_user_text: str = ""
     vim_mode: bool = False
+    pending_escalations: int = 0
     recent_sessions: list[SessionRecord] = field(default_factory=list)
     runtime_status: RuntimeStatusSnapshot | None = None
     deferred_escalation_ids: set[str] = field(default_factory=set)
@@ -99,6 +108,7 @@ class CliAppState:
 @dataclass(frozen=True)
 class CliSlashCommand:
     name: str
+    group: str
     description: str
     handler: Any
     aliases: tuple[str, ...] = ()
@@ -110,7 +120,7 @@ class CliCommandResult:
     handled: bool = True
     should_exit: bool = False
     clear_screen: bool = False
-    message: str | None = None
+    message: Any | None = None
 
 
 @dataclass
@@ -137,6 +147,7 @@ class CliThinkingSpinner:
         self._enabled = enabled
         self._status = self._console.status("[dim]W-bot 正在思考...[/dim]", spinner="dots")
         self._active = False
+        self._raw_text = ""
 
     def start(self) -> None:
         if not self._enabled:
@@ -151,9 +162,30 @@ class CliThinkingSpinner:
             return
         if not self._active:
             return
-        phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
+        if self._raw_text:
+            phase = self._raw_text
+        else:
+            phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
         if phase:
             self._status.update(f"[dim]{phase}[/dim]")
+
+    def update_raw(self, text: str) -> None:
+        self._raw_text = str(text or "").strip()
+        self.update(self._raw_text)
+
+    def clear_raw(self) -> None:
+        self._raw_text = ""
+
+    def print_above(self, text: str) -> None:
+        if not self._enabled or not self._active:
+            self._console.print(text)
+            return
+        current_raw = self._raw_text
+        self._status.stop()
+        self._console.print(text)
+        self._status.start()
+        if current_raw:
+            self.update_raw(current_raw)
 
     def stop(self) -> None:
         if not self._enabled:
@@ -175,16 +207,14 @@ class CliStreamRenderer:
         self._console = console_obj
         self._render_markdown = render_markdown
         self._runtime_status = runtime_status
-        self._live_enabled = _supports_live_render(console_obj)
+        self._live_enabled = False
         self._spinner = CliThinkingSpinner(
             console_obj,
             runtime_status=runtime_status,
-            enabled=self._live_enabled,
+            enabled=True,
         )
         self._spinner.start()
         self._buffer = ""
-        self._live: Live | None = None
-        self._last_refresh_at = 0.0
         self._last_token_at = time.monotonic()
         self._status_line = ""
         self._last_status_line = ""
@@ -196,19 +226,110 @@ class CliStreamRenderer:
         )
         self._heartbeat_thread.start()
         self.stream_started = False
+        self._recent_tool_lines: list[str] = []
+        self._stream_box_opened = False
+        self._stream_buf = ""
+
+    def _push_tool_line(self, line: str, *, raw_status: str | None = None, spinner_text: str | None = None) -> None:
+        text = str(line or "").rstrip()
+        if not text:
+            return
+        self._recent_tool_lines.append(text)
+        self._recent_tool_lines = self._recent_tool_lines[-8:]
+        if self._runtime_status is not None and raw_status is not None:
+            self._runtime_status.record_status_message(raw_status)
+        self._flush_stream()
+        if spinner_text:
+            self._spinner.update_raw(spinner_text)
+        self._spinner.print_above(text)
+
+    def _open_stream_box(self) -> None:
+        if self._stream_box_opened:
+            return
+        width = max(20, self._console.size.width)
+        label = " W-bot "
+        fill = max(0, width - 2 - len(label))
+        self._spinner.stop()
+        self._console.print()
+        self._console.print(f"╭─{label}{'─' * max(fill - 1, 0)}╮")
+        self._stream_box_opened = True
+        self.stream_started = True
+
+    def _flush_stream(self) -> None:
+        if self._stream_buf:
+            self._console.print(self._stream_buf)
+            self._stream_buf = ""
+        if self._stream_box_opened:
+            width = max(20, self._console.size.width)
+            self._console.print(f"╰{'─' * (width - 2)}╯")
+            self._stream_box_opened = False
 
     def update_status(self, text: str) -> None:
+        raw = str(text or "")
+        if raw.startswith("  ┊ "):
+            self._push_tool_line(
+                raw,
+                raw_status=raw.strip(),
+                spinner_text=raw.strip(),
+            )
+            return
+        self._spinner.clear_raw()
         if self._runtime_status is not None:
             self._runtime_status.record_status_message(text)
         phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
         self._status_line = phase.strip()
         self._spinner.update(text)
 
-    def _renderable(self, *, final: bool = False) -> Any:
-        payload = normalize_display_text(self._buffer)
-        if final and self._render_markdown and payload:
-            return Markdown(payload)
-        return Text(payload if payload or final else "")
+    def on_tool_progress(
+        self,
+        event_type: str,
+        tool_name: str | None = None,
+        preview: str | None = None,
+        function_args: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        del function_args
+        name = str(tool_name or "").strip() or "tool"
+        label = str(preview or name).strip() or name
+        if len(label) > 88:
+            label = label[:85] + "..."
+        if event_type == "tool.started":
+            prepare_line = f"  ┊ ⚡ preparing {name}..."
+            self._push_tool_line(
+                prepare_line,
+                raw_status=prepare_line.strip(),
+                spinner_text=f"{_tool_progress_emoji(name)} {label}",
+            )
+            return
+        if event_type != "tool.completed":
+            return
+        elapsed_seconds = kwargs.get("elapsed_seconds")
+        ok = kwargs.get("ok")
+        done_line = _format_tool_done_line(
+            tool_name=name,
+            preview=label,
+            elapsed_seconds=float(elapsed_seconds) if isinstance(elapsed_seconds, (int, float)) else None,
+            ok=bool(ok) if isinstance(ok, bool) else None,
+        )
+        self._push_tool_line(
+            done_line,
+            raw_status=done_line.strip(),
+            spinner_text=f"{_tool_progress_emoji(name)} {label}",
+        )
+
+    def _emit_stream_text(self, text: str) -> None:
+        if not text:
+            return
+        visible = str(text)
+        if not self._stream_box_opened:
+            visible = visible.lstrip("\n")
+            if not visible:
+                return
+            self._open_stream_box()
+        self._stream_buf += visible
+        while "\n" in self._stream_buf:
+            line, self._stream_buf = self._stream_buf.split("\n", 1)
+            self._console.print(line)
 
     def on_delta(self, delta: Any) -> None:
         payload = delta
@@ -223,78 +344,22 @@ class CliStreamRenderer:
         if not payload:
             return
         self._last_token_at = time.monotonic()
-        # CLI token_callback receives incremental answer text from the
-        # streaming layer. Appending directly avoids swallowing legitimate
-        # repeated characters/phrases during rendering.
         self._buffer = normalize_display_text(self._buffer + str(payload))
-        if not self._live_enabled:
-            # In non-interactive terminals (e.g. TERM=dumb), rich.Live redraws
-            # degrade into repeated appended lines. Keep collecting text and
-            # render once in finish().
-            return
-        if self._live is None:
-            if not self._buffer.strip():
-                return
-            self._spinner.stop()
-            self._console.print()
-            self._console.print("[bold cyan]W-bot[/bold cyan]")
-            self._live = Live(
-                self._renderable(final=False),
-                console=self._console,
-                auto_refresh=False,
-                transient=True,
-            )
-            self._live.start()
-            self.stream_started = True
-        self._refresh_live(force="\n" in payload)
-
-    def _refresh_live(self, *, force: bool = False) -> None:
-        if self._live is None:
-            return
-        now = time.monotonic()
-        if not force and (now - self._last_refresh_at) <= 0.05:
-            return
-        self._live.update(self._renderable(final=False))
-        self._live.refresh()
-        self._last_refresh_at = now
+        self._emit_stream_text(str(payload))
 
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(1.0):
-            if self._live is None:
-                continue
-            idle_seconds = time.monotonic() - self._last_token_at
-            if idle_seconds < 3.0:
-                continue
-            if self._runtime_status is not None:
-                status_text = self._runtime_status.spinner_text().strip()
-            else:
-                status_text = self._status_line.strip()
-            if not status_text:
-                continue
-            if status_text == self._last_status_line and idle_seconds < 8.0:
-                continue
-            self._last_status_line = status_text
+            continue
 
     def finish(self, final_text: str = "") -> None:
         self._closed.set()
         self._status_line = ""
         final_payload = final_text or self._buffer
-        if self._live is not None:
-            if final_payload and final_payload != self._buffer:
-                self._buffer = normalize_display_text(final_payload)
-            self._live.update(self._renderable(final=False))
-            self._live.refresh()
-            self._live.stop()
-            self._live = None
-            self._console.print(self._renderable(final=True))
-            self._console.print()
-            self._spinner.stop()
-            return
+        if final_payload and not self.stream_started:
+            self._buffer = normalize_display_text(final_payload)
+            self._emit_stream_text(final_payload)
+        self._flush_stream()
         self._spinner.stop()
-        self._buffer = normalize_display_text(final_payload)
-        self._console.print()
-        self._console.print("[bold cyan]W-bot[/bold cyan]")
-        self._console.print(self._renderable(final=True))
         self._console.print()
 
 
@@ -320,6 +385,442 @@ def _supports_live_render(console_obj: Console) -> bool:
     except Exception:
         return False
     return True
+
+
+def _refresh_cli_meta(
+    *,
+    app_state: CliAppState,
+    graph: Any,
+    escalation_manager: EscalationManager | None,
+) -> None:
+    app_state.recent_sessions = app_state.recent_sessions or []
+    if app_state.runtime_status is not None:
+        app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+    pending_requests = 0
+    if escalation_manager is not None:
+        pending_requests += len(
+            escalation_manager.list_requests(session_id=app_state.session_id, status="pending", limit=20)
+        )
+        pending_requests += len(
+            escalation_manager.list_requests(session_id="-", status="pending", limit=20)
+        )
+    app_state.pending_escalations = pending_requests
+
+
+def _render_cli_welcome(app_state: CliAppState) -> None:
+    layout = Table.grid(expand=True, padding=(0, 2))
+    layout.add_column(ratio=2)
+    layout.add_column(ratio=3)
+
+    model = _shorten_text((app_state.current_model or "未配置模型").split("/")[-1], 32)
+    cwd = _shorten_text(app_state.workspace_root or str(Path.cwd().resolve()), 52)
+
+    left_lines = [
+        "[bold cyan]W-bot CLI[/bold cyan]",
+        f"[bold green]{model}[/bold green] [dim]· 当前工作目录[/dim]",
+        f"[dim]{cwd}[/dim]",
+        f"[dim]Session: {app_state.session_id}[/dim]",
+    ]
+
+    quick_start = Table.grid(expand=False)
+    quick_start.add_column(style="bold green", no_wrap=True)
+    quick_start.add_column(style="white")
+    quick_start.add_row("/help", "查看命令分组")
+    quick_start.add_row("/session", "浏览最近会话")
+    quick_start.add_row("/skills", "查看可用技能")
+    quick_start.add_row("/status", "查看当前运行状态")
+
+    right_group = Group(
+        "[bold cyan]快速入口[/bold cyan]",
+        quick_start,
+        "",
+        "[dim]直接输入任务描述即可开始，输入 exit 或 /exit 退出。[/dim]",
+    )
+
+    layout.add_row("\n".join(left_lines), right_group)
+
+    console.print(
+        Panel(
+            layout,
+            title="欢迎使用",
+            border_style="cyan",
+            padding=(0, 2),
+        )
+    )
+
+
+def _markup_text(text: str) -> Text:
+    try:
+        return Text.from_markup(str(text))
+    except Exception:
+        return Text(str(text))
+
+
+def _panelize_message(
+    message: Any,
+    *,
+    title: str,
+    border_style: str = "cyan",
+    subtitle: str | None = None,
+) -> Panel:
+    renderable = _markup_text(message) if isinstance(message, str) else message
+    return Panel(
+        renderable,
+        title=title,
+        subtitle=subtitle,
+        border_style=border_style,
+        padding=(0, 1),
+    )
+
+
+def _render_user_message_panel(user_text: str) -> Panel:
+    normalized = normalize_display_text(user_text).rstrip() or "[empty]"
+    line_count = normalized.count("\n") + 1
+    return Panel(
+        Text(normalized),
+        title="你",
+        subtitle="多行输入" if line_count > 1 else "本轮输入",
+        border_style="green",
+        padding=(0, 1),
+    )
+
+
+def _assistant_panel_subtitle(status: RuntimeStatusSnapshot | None) -> str | None:
+    if status is None:
+        return None
+    lines = status.progress_lines()
+    compact = [line.strip() for line in lines[:2] if line.strip()]
+    return " · ".join(compact) if compact else None
+
+
+def _render_runtime_progress_panel(status: RuntimeStatusSnapshot | None) -> Panel | None:
+    if status is None:
+        return None
+    lines = status.progress_lines()
+    if not lines:
+        return None
+    return Panel(
+        Text("\n".join(lines)),
+        title="运行阶段",
+        border_style="blue",
+        padding=(0, 1),
+    )
+
+
+def _tool_progress_emoji(tool_name: str) -> str:
+    normalized = (tool_name or "").strip().lower()
+    if any(token in normalized for token in ["browser", "navigate", "web"]):
+        return "🌐"
+    if any(token in normalized for token in ["search", "grep", "find"]):
+        return "🔎"
+    if any(token in normalized for token in ["read", "fetch", "load"]):
+        return "📖"
+    if any(token in normalized for token in ["write", "edit", "patch"]):
+        return "✍"
+    if any(token in normalized for token in ["exec", "shell", "command"]):
+        return "⚙"
+    if any(token in normalized for token in ["spawn", "subagent", "wait"]):
+        return "🧩"
+    return "⚡"
+
+
+def _tool_progress_action(tool_name: str) -> str:
+    normalized = (tool_name or "").strip().lower()
+    for token, label in [
+        ("navigate", "navigate"),
+        ("search", "search"),
+        ("fetch", "fetch"),
+        ("read", "read"),
+        ("write", "write"),
+        ("edit", "edit"),
+        ("exec", "exec"),
+        ("shell", "exec"),
+        ("spawn", "spawn"),
+        ("wait", "wait"),
+    ]:
+        if token in normalized:
+            return label
+    compact = normalized.replace("mcp_", "").replace("_tool", "")
+    return compact[:18] if compact else "run"
+
+
+def _format_tool_progress_line(
+    *,
+    tool_name: str,
+    event: str,
+    preview: str,
+    elapsed_seconds: float | None,
+    ok: bool | None,
+) -> str:
+    preview_text = " ".join((preview or "").split())
+    if len(preview_text) > 88:
+        preview_text = preview_text[:85] + "..."
+    if event == "preparing":
+        return f"  ┊ ⚡ preparing {tool_name}..."
+    emoji = _tool_progress_emoji(tool_name)
+    action = _tool_progress_action(tool_name)
+    duration = f"  {elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
+    suffix = ""
+    if ok is False:
+        suffix = " [error]"
+    return f"  ┊ {emoji} {action}  {preview_text or tool_name}{duration}{suffix}"
+
+
+def _format_tool_done_line(
+    *,
+    tool_name: str,
+    preview: str,
+    elapsed_seconds: float | None,
+    ok: bool | None,
+) -> str:
+    return _format_tool_progress_line(
+        tool_name=tool_name,
+        event="finished",
+        preview=preview,
+        elapsed_seconds=elapsed_seconds,
+        ok=ok,
+    )
+
+
+def _tool_progress_phase_text(tool_name: str, event: str, preview: str) -> str:
+    preview_text = " ".join((preview or "").split())
+    if event == "preparing":
+        return f"准备执行工具调用：{tool_name}"
+    return f"工具执行中：{tool_name} {preview_text}".strip()
+
+
+def _is_tool_progress_label(text: str) -> bool:
+    normalized = (text or "").strip()
+    return normalized.startswith("┊") or normalized.startswith("  ┊")
+
+
+def _status_bar_phase_style(phase_label: str, *, pending_escalations: int) -> str:
+    normalized = (phase_label or "").strip()
+    if pending_escalations > 0:
+        return "class:status-bar-warn"
+    if _is_tool_progress_label(normalized):
+        if "[error]" in normalized:
+            return "class:status-bar-critical"
+        return "class:status-bar-good"
+    if "失败" in normalized:
+        return "class:status-bar-critical"
+    if "等待" in normalized:
+        return "class:status-bar-warn"
+    if any(token in normalized for token in ["执行", "搜索", "分析", "整理"]):
+        return "class:status-bar-good"
+    return "class:status-bar-dim"
+
+
+def _format_elapsed_label(seconds: float) -> str:
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        minutes, remain = divmod(total, 60)
+        return f"{minutes}m" if remain < 30 else f"{minutes + 1}m"
+    hours, remain = divmod(total, 3600)
+    minutes = remain // 60
+    return f"{hours}h" if minutes < 30 else f"{hours}h{minutes}m"
+
+
+def _resolve_cli_width() -> int:
+    try:
+        from prompt_toolkit.application import get_app
+
+        return get_app().output.get_size().columns
+    except Exception:
+        try:
+            return os.get_terminal_size().columns
+        except OSError:
+            return 80
+
+
+def _trim_plain_text(text: str, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    if len(text) <= max_width:
+        return text
+    return _shorten_text(text, max_width)
+
+
+def _phase_label_for_bar(phase_label: str, *, max_width: int) -> str:
+    if _is_tool_progress_label(phase_label):
+        compact = phase_label.strip().removeprefix("┊").strip()
+        return _trim_plain_text(compact, max_width)
+    return _trim_plain_text(phase_label, max_width)
+
+
+def _get_status_bar_fragments(app_state: CliAppState) -> Any:
+    if FormattedText is None:
+        return []
+    width = _resolve_cli_width()
+    status = app_state.runtime_status
+    model = _shorten_text((app_state.current_model or "-").split("/")[-1], 24)
+    phase_label = status.phase_label if status is not None else "空闲"
+    elapsed = _format_elapsed_label(max(0.0, time.monotonic() - app_state.session_started_at))
+    running_tasks = status.tasks.running if status is not None else 0
+    pending_tasks = status.tasks.pending if status is not None else 0
+    phase_style = _status_bar_phase_style(phase_label, pending_escalations=app_state.pending_escalations)
+
+    if width < 52:
+        return FormattedText(
+            [
+                ("class:status-bar", " ⚕ "),
+                ("class:status-bar-strong", model),
+                ("class:status-bar-dim", " · "),
+                ("class:status-bar-dim", elapsed),
+                ("class:status-bar", " "),
+            ]
+        )
+
+    if width < 78:
+        return FormattedText(
+            [
+                ("class:status-bar", " ⚕ "),
+                ("class:status-bar-strong", model),
+                ("class:status-bar-dim", " · "),
+                (phase_style, _phase_label_for_bar(phase_label, max_width=32)),
+                ("class:status-bar-dim", " · "),
+                ("class:status-bar-dim", elapsed),
+                ("class:status-bar", " "),
+            ]
+        )
+
+    task_label = f"{running_tasks}R/{pending_tasks}P"
+    fragments = [
+        ("class:status-bar", " ⚕ "),
+        ("class:status-bar-strong", model),
+        ("class:status-bar-dim", " │ "),
+        ("class:status-bar-dim", _shorten_text(app_state.session_id, 20)),
+        ("class:status-bar-dim", " │ "),
+        (phase_style, _phase_label_for_bar(phase_label, max_width=42)),
+        ("class:status-bar-dim", " │ "),
+        ("class:status-bar-dim", task_label),
+    ]
+    if app_state.pending_escalations:
+        fragments.extend(
+            [
+                ("class:status-bar-dim", " │ "),
+                ("class:status-bar-warn", f"审批 {app_state.pending_escalations}"),
+            ]
+        )
+    fragments.extend(
+        [
+            ("class:status-bar-dim", " │ "),
+            ("class:status-bar-dim", elapsed),
+            ("class:status-bar", " "),
+        ]
+    )
+    return FormattedText(fragments)
+
+def _build_status_line_segments(app_state: CliAppState) -> list[tuple[str, str, bool]]:
+    status = app_state.runtime_status
+    model = _shorten_text((app_state.current_model or "-").split("/")[-1], 24)
+    phase_label = status.phase_label if status is not None else "空闲"
+    elapsed = _format_elapsed_label(max(0.0, time.monotonic() - app_state.session_started_at))
+    running_tasks = status.tasks.running if status is not None else 0
+    pending_tasks = status.tasks.pending if status is not None else 0
+    width = _resolve_cli_width()
+
+    if width < 52:
+        return [
+            ("#8fa0b5", " ⚕ ", False),
+            ("#e8c86a", model, True),
+            ("#6f7d8e", " · ", False),
+            ("#8fa0b5", elapsed, False),
+        ]
+
+    if width < 78:
+        phase_color, phase_bold = _prompt_phase_style(
+            phase_label,
+            pending_escalations=app_state.pending_escalations,
+        )
+        return [
+            ("#8fa0b5", " ⚕ ", False),
+            ("#e8c86a", model, True),
+            ("#6f7d8e", " · ", False),
+            (phase_color, _phase_label_for_bar(phase_label, max_width=32), phase_bold),
+            ("#6f7d8e", " · ", False),
+            ("#8fa0b5", elapsed, False),
+        ]
+
+    phase_color, phase_bold = _prompt_phase_style(
+        phase_label,
+        pending_escalations=app_state.pending_escalations,
+    )
+    segments: list[tuple[str, str, bool]] = [
+        ("#8fa0b5", " ⚕ ", False),
+        ("#e8c86a", model, True),
+        ("#6f7d8e", " │ ", False),
+        ("#8fa0b5", _shorten_text(app_state.session_id, 20), False),
+        ("#6f7d8e", " │ ", False),
+        (phase_color, _phase_label_for_bar(phase_label, max_width=42), phase_bold),
+        ("#6f7d8e", " │ ", False),
+        ("#8fa0b5", f"{running_tasks}R/{pending_tasks}P", False),
+    ]
+    if app_state.pending_escalations:
+        segments.extend(
+            [
+                ("#6f7d8e", " │ ", False),
+                ("#d9b56d", f"审批 {app_state.pending_escalations}", True),
+            ]
+        )
+    segments.extend(
+        [
+            ("#6f7d8e", " │ ", False),
+            ("#8fa0b5", elapsed, False),
+        ]
+    )
+    return segments
+
+
+def _rich_phase_style(phase_label: str, *, pending_escalations: int) -> str:
+    normalized = (phase_label or "").strip()
+    if pending_escalations > 0:
+        return "bold yellow"
+    if _is_tool_progress_label(normalized):
+        if "[error]" in normalized:
+            return "bold red"
+        return "bold green"
+    if "失败" in normalized:
+        return "bold red"
+    if "等待" in normalized:
+        return "bold yellow"
+    if any(token in normalized for token in ["执行", "搜索", "分析", "整理"]):
+        return "bold green"
+    return "dim"
+
+
+def _prompt_phase_style(phase_label: str, *, pending_escalations: int) -> tuple[str, bool]:
+    normalized = (phase_label or "").strip()
+    if pending_escalations > 0:
+        return "#d9b56d", True
+    if _is_tool_progress_label(normalized):
+        if "[error]" in normalized:
+            return "#ef8b8b", True
+        return "#9fd3a8", True
+    if "失败" in normalized:
+        return "#ef8b8b", True
+    if "等待" in normalized:
+        return "#d9b56d", True
+    if any(token in normalized for token in ["执行", "搜索", "分析", "整理"]):
+        return "#9fd3a8", True
+    return "#8fa0b5", False
+
+
+def _build_prompt_html(app_state: CliAppState) -> str:
+    line = []
+    for color, text, bold in _build_status_line_segments(app_state):
+        segment = f"<style fg='{color}'>{html.escape(text)}</style>"
+        if bold:
+            segment = f"<b>{segment}</b>"
+        line.append(segment)
+    line_html = "".join(line)
+    return (
+        f"{line_html}\n"
+        "<style fg='#cd7f32'>────────────────────────────────────────</style>\n"
+        "<b fg='ansicyan'>You:</b> "
+    )
 
 def run_cli(
     config_path: str = DEFAULT_APP_CONFIG_PATH,
@@ -450,13 +951,14 @@ def _repl(
     session_store.save(current_session_id, workspace_root=str(Path.cwd().resolve()))
     app_state = CliAppState(
         session_id=current_session_id,
+        current_model=settings.model_routing.text_model_name,
+        workspace_root=str(Path.cwd().resolve()),
         recent_sessions=session_store.list_recent(),
         runtime_status=runtime_status,
     )
     logger.info("Loaded session_id=%s", current_session_id)
-    console.print(
-        f"[bold green]Current session:[/bold green] {current_session_id}  ([bold]/new[/bold] for new session)"
-    )
+    _refresh_cli_meta(app_state=app_state, graph=graph, escalation_manager=escalation_manager)
+    _render_cli_welcome(app_state=app_state)
 
     _render_existing_session_history(graph=graph, session_id=current_session_id)
     input_reader = CliInputReader(settings=settings, commands=_build_slash_commands(), app_state=app_state)
@@ -471,6 +973,7 @@ def _repl(
             app_state.runtime_status.set_session(current_session_id)
             app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
         app_state.recent_sessions = session_store.list_recent()
+        _refresh_cli_meta(app_state=app_state, graph=graph, escalation_manager=escalation_manager)
         if user_text.startswith("/"):
             command_result = _handle_slash_command(
                 raw_text=user_text,
@@ -488,12 +991,12 @@ def _repl(
             app_state.recent_sessions = session_store.list_recent()
             if command_result.clear_screen:
                 console.clear()
-                console.print("[bold cyan]W-bot CLI[/bold cyan] | type quit/exit to leave")
-                console.print(
-                    f"[bold green]Current session:[/bold green] {current_session_id}  ([bold]/new[/bold] for new session)"
-                )
+                _render_cli_welcome(app_state=app_state)
             if command_result.message:
-                console.print(command_result.message)
+                if isinstance(command_result.message, Panel):
+                    console.print(command_result.message)
+                else:
+                    console.print(_panelize_message(command_result.message, title="系统提示", border_style="blue"))
             if command_result.should_exit:
                 logger.info("User requested exit")
                 _restore_terminal_state()
@@ -508,6 +1011,7 @@ def _repl(
             return
 
         logger.info("Received user input, len=%s", len(user_text))
+        console.print(_render_user_message_panel(user_text))
         _run_agent_turn(
             graph=graph,
             settings=settings,
@@ -526,14 +1030,11 @@ def _run_agent_turn(
     app_state: CliAppState,
     escalation_manager: EscalationManager | None = None,
     user_text: str,
-    recent_action_hint: str | None = None,
 ) -> str:
     app_state.last_user_text = user_text
     if app_state.runtime_status is not None:
-        app_state.runtime_status.set_phase(
-            "analyzing",
-            "分析需求中",
-            recent_action=recent_action_hint or _shorten_text(user_text, 120),
+        app_state.runtime_status.begin_turn(
+            recent_action=_shorten_text((user_text or "").strip().splitlines()[0] if user_text else "", 120),
         )
         app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
     renderer = CliStreamRenderer(console, runtime_status=app_state.runtime_status)
@@ -548,11 +1049,27 @@ def _run_agent_turn(
             return
         renderer.on_delta(payload)
 
+    def emit_tool_progress(
+        event_type: str,
+        function_name: str | None = None,
+        preview: str | None = None,
+        function_args: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        renderer.on_tool_progress(
+            event_type,
+            function_name,
+            preview,
+            function_args,
+            **kwargs,
+        )
+
     config = {
         "configurable": {
             "thread_id": app_state.session_id,
             "status_callback": emit_status,
             "token_callback": emit_token,
+            "tool_progress_callback": emit_tool_progress,
             "defer_summary_update": True,
         },
         "recursion_limit": settings.loop_guard.recursion_limit,
@@ -574,11 +1091,15 @@ def _run_agent_turn(
         _persist_session_snapshot(session_store=session_store, app_state=app_state)
         renderer.finish("")
         console.print(
-            "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]"
+            _panelize_message(
+                "[bold red]本轮对话出现异常，已跳过本轮并保持程序继续运行。[/bold red]",
+                title="系统异常",
+                border_style="red",
+            )
         )
         _print_failure_report(app_state)
         if detail:
-            console.print(f"[red]异常详情：{detail}[/red]")
+            console.print(_panelize_message(f"[red]异常详情：{detail}[/red]", title="异常详情", border_style="red"))
         return ""
     finally:
         clear_runtime_callbacks()
@@ -600,6 +1121,7 @@ def _run_agent_turn(
             app_state=app_state,
             escalation_manager=escalation_manager,
         )
+    _refresh_cli_meta(app_state=app_state, graph=graph, escalation_manager=escalation_manager)
     return latest_ai_text
 
 
@@ -634,10 +1156,15 @@ def _maybe_prompt_escalation_choices(
         app_state.deferred_escalation_ids.discard(request.id)
         approved = escalation_manager.approve_request(request_id=request.id)
         if approved is None:
-            console.print(f"[red]提权请求批准失败:[/red] {request.id}")
+            console.print(_panelize_message(f"[red]提权请求批准失败:[/red] {request.id}", title="审批结果", border_style="red"))
             return
-        console.print(f"[bold green]已批准提权请求[/bold green] {approved.id}")
-        console.print(_render_escalation_request(approved))
+        console.print(
+            _panelize_message(
+                _render_escalation_request(approved),
+                title=f"审批通过 · {approved.id}",
+                border_style="green",
+            )
+        )
         followup = (
             f"系统通知：提权请求 {approved.id} 已获批准。\n"
             f"已批准命令：{approved.command}\n"
@@ -650,17 +1177,21 @@ def _maybe_prompt_escalation_choices(
             app_state=app_state,
             escalation_manager=escalation_manager,
             user_text=followup,
-            recent_action_hint=f"批准提权请求 {approved.id}",
         )
         return
     if action == "deny":
         app_state.deferred_escalation_ids.discard(request.id)
         denied = escalation_manager.deny_request(request_id=request.id, reason="用户在交互式审批面板中拒绝")
         if denied is None:
-            console.print(f"[red]拒绝提权请求失败:[/red] {request.id}")
+            console.print(_panelize_message(f"[red]拒绝提权请求失败:[/red] {request.id}", title="审批结果", border_style="red"))
             return
-        console.print(f"[bold yellow]已拒绝提权请求[/bold yellow] {denied.id}")
-        console.print(_render_escalation_request(denied))
+        console.print(
+            _panelize_message(
+                _render_escalation_request(denied),
+                title=f"已拒绝审批 · {denied.id}",
+                border_style="yellow",
+            )
+        )
         return
     app_state.deferred_escalation_ids.add(request.id)
 
@@ -825,7 +1356,7 @@ def _print_failure_report(app_state: CliAppState) -> None:
     ]
     if status.last_error:
         lines.append(f"建议关注: {_shorten_text(status.last_error, 160)}")
-    console.print("\n".join(lines))
+    console.print(_panelize_message("\n".join(lines), title="失败报告", border_style="red"))
 
 
 def _render_existing_session_history(
@@ -935,11 +1466,14 @@ class CliInputReader:
             return input("\nYou: ")
         try:
             _flush_pending_tty_input()
+            prompt_html = HTML(_build_prompt_html(self._app_state)) if HTML is not None else None
             if patch_stdout is not None and HTML is not None:
                 with patch_stdout():
                     return self._run_coro(
-                        self._session.prompt_async(HTML("<b fg='ansicyan'>You:</b> "))
+                        self._session.prompt_async(prompt_html)
                     )
+            if prompt_html is not None:
+                return self._run_coro(self._session.prompt_async(prompt_html))
             return self._run_coro(self._session.prompt_async())
         except KeyboardInterrupt:
             return ""
@@ -972,6 +1506,18 @@ class CliInputReader:
             enable_open_in_editor=False,
             multiline=False,
             editing_mode=EditingMode.VI if self._app_state.vim_mode else EditingMode.EMACS,
+            completer=CliSlashCommandCompleter(self._commands),
+            complete_while_typing=True,
+            style=Style.from_dict(
+                {
+                    "status-bar": "bg:#111827 #9fb4cc",
+                    "status-bar-strong": "bg:#111827 #e8c86a bold",
+                    "status-bar-dim": "bg:#111827 #8fa0b5",
+                    "status-bar-good": "bg:#111827 #9fd3a8 bold",
+                    "status-bar-warn": "bg:#111827 #d9b56d bold",
+                    "status-bar-critical": "bg:#111827 #ef8b8b bold",
+                }
+            ),
         )
 
     def refresh(self) -> None:
@@ -1034,24 +1580,24 @@ def _resolve_prompt_history_path(settings: Settings) -> Path:
     return session_state_path.with_name(".w_bot_prompt_history")
 def _build_slash_commands() -> list[CliSlashCommand]:
     return [
-        CliSlashCommand("help", "显示可用的 CLI 命令", _cmd_help),
-        CliSlashCommand("new", "创建一个新的会话", _cmd_new, argument_hint="[session_id]"),
-        CliSlashCommand("resume", "恢复指定会话", _cmd_resume, argument_hint="<session_id>"),
-        CliSlashCommand("session", "列出最近会话和当前会话", _cmd_session, aliases=("sessions",)),
-        CliSlashCommand("escalation", "查看提权请求状态", _cmd_escalation, aliases=("esc",), argument_hint="[pending|approved|denied|request_id]"),
-        CliSlashCommand("approve", "批准提权请求并继续执行", _cmd_approve, argument_hint="[request_id]"),
-        CliSlashCommand("deny", "拒绝提权请求", _cmd_deny, argument_hint="<request_id> [reason]"),
-        CliSlashCommand("test-escalation-ui", "强制弹出提权 TUI 测试窗口", _cmd_test_escalation_ui),
-        CliSlashCommand("status", "查看当前运行状态与最近动作", _cmd_status),
-        CliSlashCommand("tasks", "查看子任务与后台任务状态", _cmd_tasks, argument_hint="[status|task_id]"),
-        CliSlashCommand("history", "查看当前会话最近消息摘要", _cmd_history, argument_hint="[count]"),
-        CliSlashCommand("stats", "查看当前会话统计信息", _cmd_stats),
-        CliSlashCommand("cost", "查看 token 使用和成本估算", _cmd_cost),
-        CliSlashCommand("vim", "切换或查看 Vim 输入模式", _cmd_vim, argument_hint="[on|off|toggle|status]"),
-        CliSlashCommand("config", "查看当前 CLI 关键配置", _cmd_config),
-        CliSlashCommand("skills", "查看技能列表或技能详情", _cmd_skills, aliases=("skill",), argument_hint="[skill_name]"),
-        CliSlashCommand("clear", "清空当前终端显示", _cmd_clear),
-        CliSlashCommand("exit", "退出 CLI", _cmd_exit, aliases=("quit",)),
+        CliSlashCommand("help", "通用", "显示可用的 CLI 命令", _cmd_help),
+        CliSlashCommand("new", "会话", "创建一个新的会话", _cmd_new, argument_hint="[session_id]"),
+        CliSlashCommand("resume", "会话", "恢复指定会话", _cmd_resume, argument_hint="<session_id>"),
+        CliSlashCommand("session", "会话", "列出最近会话和当前会话", _cmd_session, aliases=("sessions",)),
+        CliSlashCommand("history", "会话", "查看当前会话最近消息摘要", _cmd_history, argument_hint="[count]"),
+        CliSlashCommand("status", "运行时", "查看当前运行状态与最近动作", _cmd_status),
+        CliSlashCommand("tasks", "运行时", "查看子任务与后台任务状态", _cmd_tasks, argument_hint="[status|task_id]"),
+        CliSlashCommand("stats", "运行时", "查看当前会话统计信息", _cmd_stats),
+        CliSlashCommand("cost", "运行时", "查看 token 使用和成本估算", _cmd_cost),
+        CliSlashCommand("config", "运行时", "查看当前 CLI 关键配置", _cmd_config),
+        CliSlashCommand("escalation", "审批", "查看提权请求状态", _cmd_escalation, aliases=("esc",), argument_hint="[pending|approved|denied|request_id]"),
+        CliSlashCommand("approve", "审批", "批准提权请求并继续执行", _cmd_approve, argument_hint="[request_id]"),
+        CliSlashCommand("deny", "审批", "拒绝提权请求", _cmd_deny, argument_hint="<request_id> [reason]"),
+        CliSlashCommand("test-escalation-ui", "审批", "强制弹出提权 TUI 测试窗口", _cmd_test_escalation_ui),
+        CliSlashCommand("skills", "技能", "查看技能列表或技能详情", _cmd_skills, aliases=("skill",), argument_hint="[skill_name]"),
+        CliSlashCommand("vim", "界面", "切换或查看 Vim 输入模式", _cmd_vim, argument_hint="[on|off|toggle|status]"),
+        CliSlashCommand("clear", "界面", "清空当前终端显示", _cmd_clear),
+        CliSlashCommand("exit", "界面", "退出 CLI", _cmd_exit, aliases=("quit",)),
     ]
 
 
@@ -1066,18 +1612,45 @@ def _handle_slash_command(raw_text: str, context: CliCommandContext) -> CliComma
     for command in _build_slash_commands():
         if name == command.name or name in command.aliases:
             return command.handler(args, context)
-    return CliCommandResult(message=f"[yellow]Unknown command:[/yellow] {normalized}\n输入 [bold]/help[/bold] 查看可用命令。")
+    return CliCommandResult(
+        message=_panelize_message(
+            f"[yellow]未知命令：[/yellow] {normalized}\n输入 [bold]/help[/bold] 查看可用命令。",
+            title="命令提示",
+            border_style="yellow",
+        )
+    )
 
 
 def _cmd_help(args: str, context: CliCommandContext) -> CliCommandResult:
     del args, context
-    lines = ["[bold cyan]Available commands[/bold cyan]"]
+    grouped: dict[str, list[CliSlashCommand]] = {}
     for command in _build_slash_commands():
-        hint = f" {command.argument_hint}" if command.argument_hint else ""
-        alias_text = f" [dim](aliases: {', '.join('/' + alias for alias in command.aliases)})[/dim]" if command.aliases else ""
-        lines.append(f"[bold]/{command.name}[/bold]{hint} - {command.description}{alias_text}")
-    lines.append("[dim]提示：支持方向键历史、自动补全、Ctrl+L 清屏。[/dim]")
-    return CliCommandResult(message="\n".join(lines))
+        grouped.setdefault(command.group, []).append(command)
+
+    renderables: list[Any] = [
+        "[bold cyan]CLI 命令总览[/bold cyan]",
+        "[dim]提示：支持方向键历史、Tab 自动补全、Ctrl+L 清屏。[/dim]",
+    ]
+    ordered_groups = ["会话", "运行时", "审批", "技能", "界面", "通用"]
+    for group in ordered_groups:
+        items = grouped.get(group)
+        if not items:
+            continue
+        table = Table(
+            title=f"{group}命令",
+            box=box.SIMPLE_HEAD,
+            show_lines=False,
+            header_style="bold cyan",
+            expand=False,
+        )
+        table.add_column("命令", style="bold green", no_wrap=True)
+        table.add_column("说明", style="white")
+        for command in items:
+            hint = f" {command.argument_hint}" if command.argument_hint else ""
+            alias_text = f" [dim]别名: {', '.join('/' + alias for alias in command.aliases)}[/dim]" if command.aliases else ""
+            table.add_row(f"/{command.name}{hint}", f"{command.description}{alias_text}")
+        renderables.append(table)
+    return CliCommandResult(message=_panelize_message(Group(*renderables), title="命令帮助", border_style="cyan"))
 
 
 def _cmd_new(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1133,7 +1706,7 @@ def _cmd_escalation(args: str, context: CliCommandContext) -> CliCommandResult:
         )
         if item.justification:
             lines.append(f"  reason: {_shorten_text(item.justification, 100)}")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="审批请求", border_style="yellow"))
 
 
 def _cmd_approve(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1161,8 +1734,13 @@ def _cmd_approve(args: str, context: CliCommandContext) -> CliCommandResult:
     if approved is None:
         return CliCommandResult(message=f"[red]提权请求批准失败:[/red] {request.id}")
 
-    console.print(f"[bold green]已批准提权请求[/bold green] {approved.id}")
-    console.print(_render_escalation_request(approved))
+    console.print(
+        _panelize_message(
+            _render_escalation_request(approved),
+            title=f"审批通过 · {approved.id}",
+            border_style="green",
+        )
+    )
     followup = (
         f"系统通知：提权请求 {approved.id} 已获批准。\n"
         f"已批准命令：{approved.command}\n"
@@ -1175,7 +1753,6 @@ def _cmd_approve(args: str, context: CliCommandContext) -> CliCommandResult:
         app_state=context.app_state,
         escalation_manager=context.escalation_manager,
         user_text=followup,
-        recent_action_hint=f"批准提权请求 {approved.id}",
     )
     return CliCommandResult(handled=True)
 
@@ -1195,7 +1772,7 @@ def _cmd_deny(args: str, context: CliCommandContext) -> CliCommandResult:
     lines = [f"[bold yellow]已拒绝提权请求[/bold yellow] {denied.id}"]
     if denied.denial_reason:
         lines.append(f"原因: {denied.denial_reason}")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="审批结果", border_style="yellow"))
 
 
 def _cmd_test_escalation_ui(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1217,32 +1794,43 @@ def _cmd_test_escalation_ui(args: str, context: CliCommandContext) -> CliCommand
         "[bold cyan]Escalation UI Test[/bold cyan]",
         f"- selected_action: {action}",
     ]
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="审批测试", border_style="yellow"))
 
 
 def _cmd_session(args: str, context: CliCommandContext) -> CliCommandResult:
     del args
     recent = context.session_store.list_recent()
-    lines = [
-        f"[bold green]Current session:[/bold green] {context.app_state.session_id}",
-        "[bold cyan]Recent sessions[/bold cyan]",
-    ]
     if not recent:
-        lines.append("[dim]No saved sessions yet.[/dim]")
-    else:
-        for record in recent:
-            marker = " [green](current)[/green]" if record.session_id == context.app_state.session_id else ""
-            detail_parts = [f"[dim]{record.updated_at}[/dim]"]
-            if record.last_phase:
-                detail_parts.append(f"[dim]{record.last_phase}[/dim]")
-            if record.task_count:
-                detail_parts.append(f"[dim]tasks={record.task_count}[/dim]")
-            lines.append(f"- {record.session_id} {' '.join(detail_parts)}{marker}")
-            if record.title:
-                lines.append(f"  title: {record.title}")
-            if record.last_action:
-                lines.append(f"  last_action: {_shorten_text(record.last_action, 100)}")
-    return CliCommandResult(message="\n".join(lines))
+        return CliCommandResult(message="[dim]当前还没有已保存的会话。[/dim]")
+    table = Table(
+        title="最近会话",
+        box=box.SIMPLE_HEAD,
+        header_style="bold cyan",
+        expand=True,
+    )
+    table.add_column("当前", justify="center", no_wrap=True)
+    table.add_column("Session", style="bold green", no_wrap=True)
+    table.add_column("标题", overflow="fold")
+    table.add_column("更新时间", style="dim", no_wrap=True)
+    table.add_column("状态", no_wrap=True)
+    table.add_column("任务", justify="right", no_wrap=True)
+    for record in recent:
+        is_current = record.session_id == context.app_state.session_id
+        title = record.title or "[dim]暂无标题[/dim]"
+        phase = record.last_phase or "[dim]空闲[/dim]"
+        table.add_row(
+            "●" if is_current else "",
+            record.session_id,
+            _shorten_text(title, 60),
+            record.updated_at,
+            phase,
+            str(record.task_count or 0),
+        )
+    summary = (
+        f"[bold green]当前会话[/bold green]: {context.app_state.session_id}\n"
+        "[dim]可用 /new 创建新会话，或用 /resume <session_id> 恢复指定会话。[/dim]"
+    )
+    return CliCommandResult(message=_panelize_message(Group(summary, table), title="会话列表", border_style="cyan"))
 
 
 def _cmd_status(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1268,7 +1856,7 @@ def _cmd_status(args: str, context: CliCommandContext) -> CliCommandResult:
         lines.append("- highlighted_tasks:")
         for item in status.tasks.highlighted_tasks:
             lines.append(f"  - {item}")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="运行状态", border_style="blue"))
 
 
 def _cmd_tasks(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1296,7 +1884,7 @@ def _cmd_tasks(args: str, context: CliCommandContext) -> CliCommandResult:
         final_response = str(job.get("final_response") or "").strip()
         if final_response and status == "completed":
             lines.append(f"  result: {_shorten_text(final_response, 120)}")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="子任务状态", border_style="magenta"))
 
 
 def _cmd_history(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1307,7 +1895,7 @@ def _cmd_history(args: str, context: CliCommandContext) -> CliCommandResult:
         except ValueError:
             return CliCommandResult(message="[yellow]Usage:[/yellow] /history [count]")
     preview = _session_history_preview(graph=context.graph, session_id=context.app_state.session_id, limit=count)
-    return CliCommandResult(message=preview)
+    return CliCommandResult(message=_panelize_message(preview, title="会话历史", border_style="blue"))
 
 
 def _cmd_clear(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1332,7 +1920,7 @@ def _cmd_stats(args: str, context: CliCommandContext) -> CliCommandResult:
     ]
     if stats["warnings"]:
         lines.append(f"[yellow]State[/yellow]: {stats['warnings']}")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="会话统计", border_style="blue"))
 
 
 def _cmd_cost(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1350,7 +1938,7 @@ def _cmd_cost(args: str, context: CliCommandContext) -> CliCommandResult:
         )
     else:
         lines.append(f"[bold cyan]Estimated cost[/bold cyan]: ${estimate:.6f} USD")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="成本统计", border_style="blue"))
 
 
 def _cmd_vim(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1390,7 +1978,7 @@ def _cmd_config(args: str, context: CliCommandContext) -> CliCommandResult:
         f"- streaming: {settings.enable_streaming}",
         f"- vim_mode: {context.app_state.vim_mode}",
     ]
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="CLI 配置", border_style="blue"))
 
 
 def _cmd_skills(args: str, context: CliCommandContext) -> CliCommandResult:
@@ -1408,7 +1996,7 @@ def _cmd_skills(args: str, context: CliCommandContext) -> CliCommandResult:
             check = loader.check_requirements(skill)
             status = "available" if check.available else "unavailable"
             lines.append(f"- {skill.name} [{skill.source}/{status}] {skill.description or ''}".rstrip())
-        return CliCommandResult(message="\n".join(lines))
+        return CliCommandResult(message=_panelize_message("\n".join(lines), title="技能列表", border_style="cyan"))
 
     skill = loader.get_skill(skill_name)
     if skill is None:
@@ -1432,7 +2020,7 @@ def _cmd_skills(args: str, context: CliCommandContext) -> CliCommandResult:
         if check.missing_env:
             missing_parts.append(f"missing env: {', '.join(check.missing_env)}")
         lines.append(f"- unmet requirements: {'; '.join(missing_parts)}")
-    return CliCommandResult(message="\n".join(lines))
+    return CliCommandResult(message=_panelize_message("\n".join(lines), title="技能详情", border_style="cyan"))
 
 
 def _session_history_preview(*, graph: Any, session_id: str, limit: int = 6) -> str:

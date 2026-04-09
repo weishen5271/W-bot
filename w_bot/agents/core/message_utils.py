@@ -516,6 +516,20 @@ def _resolve_debug_callback(config: RunnableConfig | None) -> Callable[[str], No
     return None
 
 
+def _resolve_tool_progress_callback(config: RunnableConfig | None) -> Callable[..., None] | None:
+    if config is None:
+        return None
+    if not hasattr(config, "get"):
+        return None
+    configurable = config.get("configurable")  # type: ignore[call-arg]
+    if not isinstance(configurable, dict):
+        return None
+    callback = configurable.get("tool_progress_callback")
+    if callable(callback):
+        return callback
+    return None
+
+
 def _emit_status(config: RunnableConfig | None, text: str) -> None:
     normalized = text.strip()
     if not normalized:
@@ -678,4 +692,3 @@ def _messages_to_summary_text(messages: list[AnyMessage]) -> str:
             continue
         lines.append(f"{role}: {text}")
     return "\n".join(lines)
-

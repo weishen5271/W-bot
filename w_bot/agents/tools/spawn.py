@@ -96,6 +96,7 @@ class SpawnTool(Tool):
             label=label or "",
             context_messages=context_messages,
             parent_thread_id=_thread_id_from_kwargs(kwargs),
+            status_callback=_status_callback_from_kwargs(kwargs),
         )
         return (
             f"Spawned subagent: id={result['id']} status={result['status']} "

@@ -22,6 +22,112 @@ from w_bot.utils.helpers import _tool_result_to_text
 logger = get_logger(__name__)
 
 
+def _tool_args_preview(tool_name: str, args: dict[str, Any]) -> str:
+    candidates = [
+        args.get("url"),
+        args.get("query"),
+        args.get("path"),
+        args.get("command"),
+        args.get("task"),
+        args.get("id"),
+        args.get("working_dir"),
+    ]
+    for item in candidates:
+        text = str(item or "").strip()
+        if text:
+            compact = " ".join(text.split())
+            return compact[:96] + ("..." if len(compact) > 96 else "")
+    if not args:
+        return tool_name
+    try:
+        raw = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        raw = str(args)
+    compact = " ".join(raw.split())
+    return compact[:96] + ("..." if len(compact) > 96 else "")
+
+
+def _tool_progress_emoji(tool_name: str) -> str:
+    normalized = (tool_name or "").strip().lower()
+    if any(token in normalized for token in ["browser", "navigate", "web"]):
+        return "🌐"
+    if any(token in normalized for token in ["search", "grep", "find"]):
+        return "🔎"
+    if any(token in normalized for token in ["read", "fetch", "load"]):
+        return "📖"
+    if any(token in normalized for token in ["write", "edit", "patch"]):
+        return "✍"
+    if any(token in normalized for token in ["exec", "shell", "command"]):
+        return "⚙"
+    if any(token in normalized for token in ["spawn", "subagent", "wait"]):
+        return "🧩"
+    return "⚡"
+
+
+def _tool_progress_action(tool_name: str) -> str:
+    normalized = (tool_name or "").strip().lower()
+    for token, label in [
+        ("navigate", "navigate"),
+        ("search", "search"),
+        ("fetch", "fetch"),
+        ("read", "read"),
+        ("write", "write"),
+        ("edit", "edit"),
+        ("exec", "exec"),
+        ("shell", "exec"),
+        ("spawn", "spawn"),
+        ("wait", "wait"),
+    ]:
+        if token in normalized:
+            return label
+    compact = normalized.replace("mcp_", "").replace("_tool", "")
+    return compact[:18] if compact else "run"
+
+
+def _tool_progress_line(
+    *,
+    event_type: str,
+    tool_name: str,
+    preview: str,
+    elapsed_seconds: float | None,
+    ok: bool | None,
+) -> str:
+    if event_type == "tool.started":
+        return f"  ┊ ⚡ preparing {tool_name}..."
+    label = " ".join((preview or tool_name).split())
+    if len(label) > 88:
+        label = label[:85] + "..."
+    duration = f"  {elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
+    suffix = " [error]" if ok is False else ""
+    return f"  ┊ {_tool_progress_emoji(tool_name)} {_tool_progress_action(tool_name)}  {label}{duration}{suffix}"
+
+
+def _emit_tool_progress(
+    callback: Any | None,
+    *,
+    event_type: str,
+    tool_name: str,
+    preview: str = "",
+    elapsed_seconds: float | None = None,
+    ok: bool | None = None,
+    function_args: dict[str, Any] | None = None,
+) -> None:
+    if not callable(callback):
+        return
+    try:
+        callback(
+            _tool_progress_line(
+                event_type=event_type,
+                tool_name=tool_name,
+                preview=preview,
+                elapsed_seconds=elapsed_seconds,
+                ok=ok,
+            )
+        )
+    except Exception:
+        logger.debug("Subagent tool progress line callback failed", exc_info=True)
+
+
 @dataclass(frozen=True)
 class SubagentConfig:
     agent_type: str
@@ -108,6 +214,7 @@ class SubagentManager:
         label: str = "",
         context_messages: list[BaseMessage] | None = None,
         parent_thread_id: str = "-",
+        status_callback: Any | None = None,
     ) -> dict[str, Any]:
         definition = self._resolve_definition(agent_type)
         job_id = uuid.uuid4().hex
@@ -123,6 +230,7 @@ class SubagentManager:
             thread_id=parent_thread_id,
             config=self._build_config(definition),
             context_messages=list(context_messages or []),
+            status_callback=status_callback if callable(status_callback) else None,
         )
         done = threading.Event()
         worker = threading.Thread(
@@ -327,6 +435,15 @@ class SubagentManager:
             params = tool_call.get("arguments")
         if not isinstance(params, dict):
             params = {}
+        preview = _tool_args_preview(name, params)
+        _emit_tool_progress(
+            status_callback,
+            event_type="tool.started",
+            tool_name=name,
+            preview=preview,
+            function_args=params,
+        )
+        started_at = time.monotonic()
         params = {
             **params,
             "_wbot_tool_context": {
@@ -334,6 +451,7 @@ class SubagentManager:
                 "thread_id": thread_id,
                 "subagent_depth": 1,
                 "status_callback": status_callback if callable(status_callback) else None,
+                "tool_progress_callback": status_callback if callable(status_callback) else None,
             },
         }
         try:
@@ -342,6 +460,15 @@ class SubagentManager:
         except Exception as exc:
             logger.exception("Subagent tool execution failed: tool=%s", name)
             content = f"Tool execution failed: {type(exc).__name__}: {exc}"
+        _emit_tool_progress(
+            status_callback,
+            event_type="tool.completed",
+            tool_name=name,
+            preview=preview,
+            elapsed_seconds=time.monotonic() - started_at,
+            ok=not content.lower().startswith(("error:", "tool execution failed:", "invalid parameters:", "tool not found:")),
+            function_args=params,
+        )
         return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
 
     @staticmethod
