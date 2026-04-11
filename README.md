@@ -136,6 +136,18 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+如果服务器上没有 `uv`，可以直接使用项目自带初始化脚本自动安装 `uv`、创建 `Python 3.11` 虚拟环境并执行可编辑安装：
+
+```bash
+bash bootstrap.sh
+source .venv/bin/activate
+```
+
+可选环境变量：
+
+- `PYTHON_VERSION=3.10 bash bootstrap.sh`
+- `VENV_DIR=.venv-prod bash bootstrap.sh`
+
 ### 2. 准备配置
 
 ```bash

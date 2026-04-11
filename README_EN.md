@@ -136,6 +136,18 @@ You can also install the project in editable mode:
 pip install -e .
 ```
 
+If `uv` is not available on the server, you can use the bundled bootstrap script to install `uv`, create a Python 3.11 virtual environment, and install the project in editable mode:
+
+```bash
+bash bootstrap.sh
+source .venv/bin/activate
+```
+
+Optional environment variables:
+
+- `PYTHON_VERSION=3.10 bash bootstrap.sh`
+- `VENV_DIR=.venv-prod bash bootstrap.sh`
+
 ### 2. Prepare the Config
 
 ```bash
