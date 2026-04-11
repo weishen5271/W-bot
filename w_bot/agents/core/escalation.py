@@ -70,7 +70,10 @@ class EscalationRequest:
     created_at: str
     updated_at: str
     approved_at: str = ""
+    approved_by: str = ""
+    approval_reason: str = ""
     denied_at: str = ""
+    denied_by: str = ""
     denial_reason: str = ""
 
 
@@ -170,7 +173,13 @@ class EscalationManager:
                     return self._deserialize_request(item)
         return None
 
-    def approve_request(self, *, request_id: str) -> EscalationRequest | None:
+    def approve_request(
+        self,
+        *,
+        request_id: str,
+        approved_by: str = "",
+        reason: str = "",
+    ) -> EscalationRequest | None:
         target = str(request_id or "").strip()
         if not target:
             return None
@@ -186,13 +195,21 @@ class EscalationManager:
                 now = _now_iso()
                 updated["status"] = "approved"
                 updated["approved_at"] = now
+                updated["approved_by"] = str(approved_by or "").strip()
+                updated["approval_reason"] = str(reason or "").strip()
                 updated["updated_at"] = now
                 requests[index] = updated
                 self._save_unlocked(payload)
                 return self._deserialize_request(updated)
         return None
 
-    def deny_request(self, *, request_id: str, reason: str = "") -> EscalationRequest | None:
+    def deny_request(
+        self,
+        *,
+        request_id: str,
+        reason: str = "",
+        denied_by: str = "",
+    ) -> EscalationRequest | None:
         target = str(request_id or "").strip()
         if not target:
             return None
@@ -208,6 +225,7 @@ class EscalationManager:
                 now = _now_iso()
                 updated["status"] = "denied"
                 updated["denied_at"] = now
+                updated["denied_by"] = str(denied_by or "").strip()
                 updated["updated_at"] = now
                 updated["denial_reason"] = str(reason or "").strip()
                 requests[index] = updated
@@ -304,6 +322,9 @@ class EscalationManager:
             created_at=str(item.get("created_at") or "").strip(),
             updated_at=str(item.get("updated_at") or "").strip(),
             approved_at=str(item.get("approved_at") or "").strip(),
+            approved_by=str(item.get("approved_by") or "").strip(),
+            approval_reason=str(item.get("approval_reason") or "").strip(),
             denied_at=str(item.get("denied_at") or "").strip(),
+            denied_by=str(item.get("denied_by") or "").strip(),
             denial_reason=str(item.get("denial_reason") or "").strip(),
         )

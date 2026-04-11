@@ -5,21 +5,22 @@ import asyncio
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from w_bot.agents.core.agent import WBotGraph, message_kind
+from w_bot.agents.core.agent import WBotGraph
 from w_bot.agents.core.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
 from w_bot.agents.core.escalation import EscalationManager, EscalationRequest
 from w_bot.agents.core.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from w_bot.agents.core.logging_config import get_logger, setup_logging
+from w_bot.agents.core.message_utils import message_kind
 from w_bot.agents.core.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.core.provider_factory import build_langchain_llm
 from w_bot.agents.core.streaming import StreamTextAssembler, _latest_ai_reply_from_result, _message_to_text
@@ -37,6 +38,7 @@ class WebConfig:
     enabled: bool
     host: str
     port: int
+    auth: "WebAuthConfig"
 
     @staticmethod
     def from_dict(payload: dict[str, Any]) -> "WebConfig":
@@ -44,7 +46,78 @@ class WebConfig:
             enabled=bool(_pick(payload, "enabled", default=True)),
             host=str(_pick(payload, "host", default="127.0.0.1")).strip() or "127.0.0.1",
             port=_safe_port(_pick(payload, "port", default=8000)),
+            auth=WebAuthConfig.from_dict(_pick(payload, "auth", default={})),
         )
+
+
+@dataclass(frozen=True)
+class TokenPrincipal:
+    token: str
+    user_id: str
+    roles: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WebAuthConfig:
+    enabled: bool
+    proxy_user_header: str
+    proxy_roles_header: str
+    approver_roles: tuple[str, ...]
+    session_binding_file_path: str
+    bearer_tokens: tuple[TokenPrincipal, ...]
+
+    @staticmethod
+    def from_dict(payload: Any) -> "WebAuthConfig":
+        raw = payload if isinstance(payload, dict) else {}
+        bearer_tokens: list[TokenPrincipal] = []
+        raw_tokens = _pick(raw, "bearerTokens", "bearer_tokens", default=[])
+        if isinstance(raw_tokens, list):
+            for item in raw_tokens:
+                if not isinstance(item, dict):
+                    continue
+                token = str(_pick(item, "token", default="")).strip()
+                user_id = str(_pick(item, "userId", "user_id", default="")).strip()
+                if not token or not user_id:
+                    continue
+                roles = _normalize_roles(_pick(item, "roles", default=[]))
+                bearer_tokens.append(TokenPrincipal(token=token, user_id=user_id, roles=roles))
+        proxy_user_header = str(
+            _pick(raw, "proxyUserHeader", "proxy_user_header", default="X-Forwarded-User")
+        ).strip()
+        proxy_roles_header = str(
+            _pick(raw, "proxyRolesHeader", "proxy_roles_header", default="X-Forwarded-Roles")
+        ).strip()
+        return WebAuthConfig(
+            enabled=bool(_pick(raw, "enabled", default=False)),
+            proxy_user_header=proxy_user_header,
+            proxy_roles_header=proxy_roles_header,
+            approver_roles=_normalize_roles(
+                _pick(raw, "approverRoles", "approver_roles", default=["admin", "approver"])
+            ),
+            session_binding_file_path=str(
+                _pick(
+                    raw,
+                    "sessionBindingFilePath",
+                    "session_binding_file_path",
+                    default="configs/web_session_bindings.json",
+                )
+            ).strip()
+            or "configs/web_session_bindings.json",
+            bearer_tokens=tuple(bearer_tokens),
+        )
+
+
+@dataclass(frozen=True)
+class AuthenticatedWebUser:
+    user_id: str
+    roles: tuple[str, ...]
+    auth_mode: str
+
+    def has_any_role(self, candidates: tuple[str, ...]) -> bool:
+        if not candidates:
+            return False
+        user_roles = {item.lower() for item in self.roles}
+        return any(role.lower() in user_roles for role in candidates)
 
 
 @dataclass(frozen=True)
@@ -89,7 +162,106 @@ class EscalationItemResponse(BaseModel):
     prefix_rule: list[str]
     created_at: str
     updated_at: str
+    approved_at: str
+    approved_by: str
+    approval_reason: str
+    denied_at: str
+    denied_by: str
     denial_reason: str
+
+
+@dataclass
+class SessionBinding:
+    session_id: str
+    user_id: str
+    created_at: str
+    updated_at: str
+
+
+class SessionBindingStore:
+    def __init__(self, file_path: str) -> None:
+        target = Path(file_path).expanduser()
+        if not target.is_absolute():
+            target = Path.cwd() / target
+        self._file_path = target
+        self._lock = threading.Lock()
+
+    def bind_session(self, *, session_id: str, user_id: str) -> SessionBinding:
+        normalized_session_id = str(session_id or "").strip()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_session_id or not normalized_user_id:
+            raise ValueError("session_id and user_id are required")
+        with self._lock:
+            payload = self._load_unlocked()
+            sessions = payload.setdefault("sessions", {})
+            existing = sessions.get(normalized_session_id)
+            now = _now_iso()
+            if isinstance(existing, dict):
+                bound_user_id = str(existing.get("user_id") or "").strip()
+                if bound_user_id and bound_user_id != normalized_user_id:
+                    raise PermissionError("Session is already bound to another user")
+                existing["user_id"] = normalized_user_id
+                existing["updated_at"] = now
+                if not str(existing.get("created_at") or "").strip():
+                    existing["created_at"] = now
+                sessions[normalized_session_id] = existing
+                self._save_unlocked(payload)
+                return self._deserialize_binding(existing, session_id=normalized_session_id)
+
+            binding = SessionBinding(
+                session_id=normalized_session_id,
+                user_id=normalized_user_id,
+                created_at=now,
+                updated_at=now,
+            )
+            sessions[normalized_session_id] = asdict(binding)
+            self._save_unlocked(payload)
+            return binding
+
+    def get_binding(self, session_id: str) -> SessionBinding | None:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return None
+        with self._lock:
+            payload = self._load_unlocked()
+            sessions = payload.get("sessions", {})
+            if not isinstance(sessions, dict):
+                return None
+            item = sessions.get(normalized_session_id)
+            if not isinstance(item, dict):
+                return None
+            return self._deserialize_binding(item, session_id=normalized_session_id)
+
+    def assert_session_owner(self, *, session_id: str, user_id: str) -> SessionBinding:
+        binding = self.get_binding(session_id)
+        if binding is None:
+            return self.bind_session(session_id=session_id, user_id=user_id)
+        if binding.user_id != str(user_id or "").strip():
+            raise PermissionError("Session is bound to another user")
+        return binding
+
+    def _load_unlocked(self) -> dict[str, Any]:
+        if not self._file_path.exists():
+            return {"sessions": {}}
+        try:
+            payload = json.loads(self._file_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.exception("Failed to read web session binding file: %s", self._file_path)
+            return {"sessions": {}}
+        return payload if isinstance(payload, dict) else {"sessions": {}}
+
+    def _save_unlocked(self, payload: dict[str, Any]) -> None:
+        self._file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _deserialize_binding(payload: dict[str, Any], *, session_id: str) -> SessionBinding:
+        return SessionBinding(
+            session_id=session_id,
+            user_id=str(payload.get("user_id") or "").strip(),
+            created_at=str(payload.get("created_at") or "").strip(),
+            updated_at=str(payload.get("updated_at") or "").strip(),
+        )
 
 
 def run_web_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
@@ -175,6 +347,7 @@ def run_web_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
             expose_step_logs=settings.expose_step_logs,
             recursion_limit=settings.loop_guard.recursion_limit,
             escalation_manager=escalation_manager,
+            auth_config=cfg.web.auth,
         )
         uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
 
@@ -186,12 +359,14 @@ def _build_app(
     expose_step_logs: bool,
     recursion_limit: int,
     escalation_manager: EscalationManager,
+    auth_config: WebAuthConfig,
 ) -> FastAPI:
     app = FastAPI(title="W-bot Web Gateway")
     session_locks: dict[str, threading.Lock] = {}
     session_locks_guard = threading.Lock()
     static_root = Path(__file__).resolve().parent / "static"
     index_path = static_root / "index.html"
+    session_binding_store = SessionBindingStore(auth_config.session_binding_file_path)
 
     def _session_lock(session_id: str) -> threading.Lock:
         normalized = session_id.strip() or "_default"
@@ -201,6 +376,40 @@ def _build_app(
                 lock = threading.Lock()
                 session_locks[normalized] = lock
             return lock
+
+    @app.middleware("http")
+    async def web_auth_middleware(request: Request, call_next: Any) -> Any:
+        if not request.url.path.startswith("/api/") or request.url.path == "/api/health":
+            return await call_next(request)
+        try:
+            user = _resolve_authenticated_user(request, auth_config)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        request.state.web_user = user
+        return await call_next(request)
+
+    def _require_user(request: Request) -> AuthenticatedWebUser:
+        user = getattr(request.state, "web_user", None)
+        if not isinstance(user, AuthenticatedWebUser):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return user
+
+    def _ensure_session_owned_by_user(user: AuthenticatedWebUser, session_id: str) -> str:
+        normalized_session_id = session_id.strip()
+        if not normalized_session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        try:
+            session_binding_store.assert_session_owner(
+                session_id=normalized_session_id,
+                user_id=user.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail="Forbidden: session does not belong to current user") from exc
+        return normalized_session_id
+
+    def _require_approver(user: AuthenticatedWebUser) -> None:
+        if not user.has_any_role(auth_config.approver_roles):
+            raise HTTPException(status_code=403, detail="Forbidden: approver role required")
 
     @app.get("/")
     def read_index() -> FileResponse:
@@ -220,14 +429,16 @@ def _build_app(
         return {"status": "ok"}
 
     @app.post("/api/session/new", response_model=SessionResponse)
-    def new_session() -> SessionResponse:
-        return SessionResponse(session_id=_new_session_id(thread_prefix))
+    def new_session(request: Request) -> SessionResponse:
+        user = _require_user(request)
+        session_id = _new_session_id(thread_prefix)
+        session_binding_store.bind_session(session_id=session_id, user_id=user.user_id)
+        return SessionResponse(session_id=session_id)
 
     @app.get("/api/history", response_model=HistoryResponse)
-    def get_history(session_id: str) -> HistoryResponse:
-        if not session_id.strip():
-            raise HTTPException(status_code=400, detail="session_id is required")
-        normalized_session_id = session_id.strip()
+    def get_history(session_id: str, request: Request) -> HistoryResponse:
+        user = _require_user(request)
+        normalized_session_id = _ensure_session_owned_by_user(user, session_id)
         config = {"configurable": {"thread_id": normalized_session_id}}
 
         with _session_lock(normalized_session_id):
@@ -249,15 +460,17 @@ def _build_app(
                 }
             )
 
-        return HistoryResponse(session_id=session_id.strip(), messages=normalized)
+        return HistoryResponse(session_id=normalized_session_id, messages=normalized)
 
     @app.post("/api/chat", response_model=ChatResponse)
-    def chat(payload: ChatRequest) -> ChatResponse:
+    def chat(payload: ChatRequest, request: Request) -> ChatResponse:
+        user = _require_user(request)
         message = sanitize_user_text(payload.message)
         if not message.strip():
             raise HTTPException(status_code=400, detail="message is required")
 
         session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
+        session_id = _ensure_session_owned_by_user(user, session_id)
         config = {
             "configurable": {
                 "thread_id": session_id,
@@ -280,47 +493,61 @@ def _build_app(
         return ChatResponse(session_id=session_id, reply=latest_ai_text)
 
     @app.get("/api/escalations", response_model=list[EscalationItemResponse])
-    def list_escalations(session_id: str, status: str | None = None) -> list[EscalationItemResponse]:
-        if not session_id.strip():
-            raise HTTPException(status_code=400, detail="session_id is required")
-        items = escalation_manager.list_requests(session_id=session_id.strip(), status=status, limit=20)
+    def list_escalations(session_id: str, request: Request, status: str | None = None) -> list[EscalationItemResponse]:
+        user = _require_user(request)
+        normalized_session_id = _ensure_session_owned_by_user(user, session_id)
+        items = escalation_manager.list_requests(session_id=normalized_session_id, status=status, limit=20)
         return [_serialize_escalation_item(item) for item in items]
 
     @app.post("/api/escalations/approve", response_model=EscalationItemResponse)
-    def approve_escalation(payload: EscalationActionRequest) -> EscalationItemResponse:
+    def approve_escalation(payload: EscalationActionRequest, request: Request) -> EscalationItemResponse:
+        user = _require_user(request)
+        _require_approver(user)
         session_id = payload.session_id.strip()
         request_id = payload.request_id.strip()
         if not session_id or not request_id:
             raise HTTPException(status_code=400, detail="session_id and request_id are required")
-        request = escalation_manager.get_request(request_id)
-        if request is None or request.session_id != session_id:
+        escalation_request = escalation_manager.get_request(request_id)
+        if escalation_request is None or escalation_request.session_id != session_id:
             raise HTTPException(status_code=404, detail="Escalation request not found")
-        approved = escalation_manager.approve_request(request_id=request_id)
+        approved = escalation_manager.approve_request(
+            request_id=request_id,
+            approved_by=user.user_id,
+            reason=payload.reason or "",
+        )
         if approved is None:
             raise HTTPException(status_code=500, detail="Failed to approve escalation request")
         return _serialize_escalation_item(approved)
 
     @app.post("/api/escalations/deny", response_model=EscalationItemResponse)
-    def deny_escalation(payload: EscalationActionRequest) -> EscalationItemResponse:
+    def deny_escalation(payload: EscalationActionRequest, request: Request) -> EscalationItemResponse:
+        user = _require_user(request)
+        _require_approver(user)
         session_id = payload.session_id.strip()
         request_id = payload.request_id.strip()
         if not session_id or not request_id:
             raise HTTPException(status_code=400, detail="session_id and request_id are required")
-        request = escalation_manager.get_request(request_id)
-        if request is None or request.session_id != session_id:
+        escalation_request = escalation_manager.get_request(request_id)
+        if escalation_request is None or escalation_request.session_id != session_id:
             raise HTTPException(status_code=404, detail="Escalation request not found")
-        denied = escalation_manager.deny_request(request_id=request_id, reason=payload.reason or "")
+        denied = escalation_manager.deny_request(
+            request_id=request_id,
+            reason=payload.reason or "",
+            denied_by=user.user_id,
+        )
         if denied is None:
             raise HTTPException(status_code=500, detail="Failed to deny escalation request")
         return _serialize_escalation_item(denied)
 
     @app.post("/api/chat/stream")
-    def chat_stream(payload: ChatRequest) -> StreamingResponse:
+    def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
+        user = _require_user(request)
         message = sanitize_user_text(payload.message)
         if not message.strip():
             raise HTTPException(status_code=400, detail="message is required")
 
         session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
+        session_id = _ensure_session_owned_by_user(user, session_id)
         async def event_stream() -> Any:
             loop = asyncio.get_running_loop()
             event_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
@@ -593,8 +820,62 @@ def _serialize_escalation_item(item: EscalationRequest) -> EscalationItemRespons
         prefix_rule=item.prefix_rule,
         created_at=item.created_at,
         updated_at=item.updated_at,
+        approved_at=item.approved_at,
+        approved_by=item.approved_by,
+        approval_reason=item.approval_reason,
+        denied_at=item.denied_at,
+        denied_by=item.denied_by,
         denial_reason=item.denial_reason,
     )
+
+
+def _normalize_roles(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raw_items = []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        lowered = item.lower()
+        if not lowered or lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(item)
+    return tuple(normalized)
+
+
+def _resolve_authenticated_user(request: Request, auth_config: WebAuthConfig) -> AuthenticatedWebUser:
+    if not auth_config.enabled:
+        return AuthenticatedWebUser(user_id="web_anonymous", roles=("approver", "admin"), auth_mode="disabled")
+
+    authorization = str(request.headers.get("Authorization") or "").strip()
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        for principal in auth_config.bearer_tokens:
+            if principal.token == token:
+                return AuthenticatedWebUser(
+                    user_id=principal.user_id,
+                    roles=principal.roles or ("user",),
+                    auth_mode="bearer",
+                )
+
+    proxy_user_id = str(request.headers.get(auth_config.proxy_user_header) or "").strip()
+    if proxy_user_id:
+        proxy_roles = _normalize_roles(request.headers.get(auth_config.proxy_roles_header) or "user")
+        return AuthenticatedWebUser(
+            user_id=proxy_user_id,
+            roles=proxy_roles or ("user",),
+            auth_mode="proxy",
+        )
+
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
 def main() -> None:

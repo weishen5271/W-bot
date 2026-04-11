@@ -325,7 +325,21 @@ The default template already includes placeholders for many OpenAI-compatible pr
 {
   "enabled": true,
   "host": "127.0.0.1",
-  "port": 8000
+  "port": 8000,
+  "auth": {
+    "enabled": false,
+    "proxyUserHeader": "X-Forwarded-User",
+    "proxyRolesHeader": "X-Forwarded-Roles",
+    "approverRoles": ["admin", "approver"],
+    "sessionBindingFilePath": "configs/web_session_bindings.json",
+    "bearerTokens": [
+      {
+        "token": "replace-with-a-long-random-token",
+        "userId": "web_admin",
+        "roles": ["admin", "approver"]
+      }
+    ]
+  }
 }
 ```
 
@@ -337,6 +351,13 @@ The web gateway provides:
 - `GET /api/history`
 - `POST /api/chat`
 - `POST /api/chat/stream`
+
+When `channels.web.auth.enabled=true`:
+
+- every `/api/*` request except `/api/health` requires an authenticated identity
+- both `Authorization: Bearer <token>` and reverse-proxy injected user headers are supported
+- each `session_id` is bound to the current `userId`, preventing cross-user history access or chat continuation
+- escalation approval endpoints require one of the configured `approverRoles` and record approver, timestamp, and reason
 
 ### `channels.feishu`
 

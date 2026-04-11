@@ -214,7 +214,8 @@
       background: #f8fafc;
     }
 
-    textarea {
+    textarea,
+    input[type="password"] {
       flex: 1;
       min-height: 52px;
       max-height: 140px;
@@ -227,7 +228,13 @@
       outline: none;
     }
 
-    textarea:focus {
+    input[type="password"] {
+      min-height: auto;
+      resize: none;
+    }
+
+    textarea:focus,
+    input[type="password"]:focus {
       border-color: var(--primary);
       box-shadow: 0 0 0 3px rgba(3, 105, 161, 0.12);
     }
@@ -299,6 +306,9 @@
     <div class="session" id="sessionText">session: -</div>
     <button class="btn" id="newSessionBtn" type="button">新会话</button>
   </div>
+  <div class="composer" style="padding-top: 0;">
+    <input id="tokenInput" type="password" placeholder="可选：Bearer Token（未配置反向代理时使用）" />
+  </div>
   <div class="messages" id="messages"></div>
   <div class="composer">
     <textarea id="input" placeholder="输入你的问题，按 Enter 发送，Shift+Enter 换行"></textarea>
@@ -312,9 +322,30 @@
   const sendBtn = document.getElementById("sendBtn");
   const newSessionBtn = document.getElementById("newSessionBtn");
   const sessionText = document.getElementById("sessionText");
+  const tokenInputEl = document.getElementById("tokenInput");
   const STORAGE_KEY = "w_bot_web_session_id";
+  const TOKEN_STORAGE_KEY = "w_bot_web_bearer_token";
   let sessionId = localStorage.getItem(STORAGE_KEY) || "";
+  tokenInputEl.value = localStorage.getItem(TOKEN_STORAGE_KEY) || "";
   let sending = false;
+
+  tokenInputEl.addEventListener("change", () => {
+    const token = tokenInputEl.value.trim();
+    if (token) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+  });
+
+  function buildAuthHeaders(extraHeaders = {}) {
+    const headers = {...extraHeaders};
+    const token = tokenInputEl.value.trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return headers;
+  }
 
   function addMessage(role, content, {autoScroll = true} = {}) {
     const div = document.createElement("div");
@@ -440,7 +471,7 @@
   }
 
   async function createSessionAndLoadHistory() {
-    const res = await fetch("/api/session/new", {method: "POST"});
+    const res = await fetch("/api/session/new", {method: "POST", headers: buildAuthHeaders()});
     if (!res.ok) throw new Error("新建会话失败");
     const data = await res.json();
     sessionId = data.session_id;
@@ -455,8 +486,14 @@
       await createSessionAndLoadHistory();
       return;
     }
-    const res = await fetch(`/api/history?session_id=${encodeURIComponent(sessionId)}`);
+    const res = await fetch(`/api/history?session_id=${encodeURIComponent(sessionId)}`, {
+      headers: buildAuthHeaders(),
+    });
     if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        const info = await res.json().catch(() => ({}));
+        throw new Error(info.detail || "鉴权失败，请检查 Bearer Token 或反向代理身份头");
+      }
       await createSessionAndLoadHistory();
       return;
     }
@@ -590,7 +627,7 @@
     try {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
-        headers: {"Content-Type": "application/json"},
+        headers: buildAuthHeaders({"Content-Type": "application/json"}),
         body: JSON.stringify({message: text, session_id: sessionId || null}),
       });
       if (!res.ok) {

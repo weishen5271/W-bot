@@ -325,7 +325,21 @@ wbot sessions --config configs/app.json
 {
   "enabled": true,
   "host": "127.0.0.1",
-  "port": 8000
+  "port": 8000,
+  "auth": {
+    "enabled": false,
+    "proxyUserHeader": "X-Forwarded-User",
+    "proxyRolesHeader": "X-Forwarded-Roles",
+    "approverRoles": ["admin", "approver"],
+    "sessionBindingFilePath": "configs/web_session_bindings.json",
+    "bearerTokens": [
+      {
+        "token": "replace-with-a-long-random-token",
+        "userId": "web_admin",
+        "roles": ["admin", "approver"]
+      }
+    ]
+  }
 }
 ```
 
@@ -337,6 +351,13 @@ Web 网关提供：
 - `GET /api/history`
 - `POST /api/chat`
 - `POST /api/chat/stream`
+
+当 `channels.web.auth.enabled=true` 时：
+
+- 所有 `/api/*` 请求（`/api/health` 除外）都必须带认证身份
+- 支持 `Authorization: Bearer <token>` 或反向代理注入用户头
+- `session_id` 会绑定到当前 `userId`，不能跨用户读取历史或继续对话
+- 提权审批接口只允许 `approverRoles` 中的角色调用，并记录审批人、审批时间、审批理由
 
 ### `channels.feishu`
 

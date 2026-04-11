@@ -677,6 +677,20 @@ def default_app_config() -> dict[str, Any]:
                 "enabled": True,
                 "host": "127.0.0.1",
                 "port": 8000,
+                "auth": {
+                    "enabled": False,
+                    "proxyUserHeader": "X-Forwarded-User",
+                    "proxyRolesHeader": "X-Forwarded-Roles",
+                    "approverRoles": ["admin", "approver"],
+                    "sessionBindingFilePath": "configs/web_session_bindings.json",
+                    "bearerTokens": [
+                        {
+                            "token": "replace-with-a-long-random-token",
+                            "userId": "web_admin",
+                            "roles": ["admin", "approver"],
+                        }
+                    ],
+                },
             },
         },
         "threadPrefix": "feishu",
