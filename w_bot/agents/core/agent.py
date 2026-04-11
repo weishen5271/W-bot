@@ -43,7 +43,7 @@ from ..skills.subagent import SubagentManager
 from .config import IntentClassifierSettings, MultimodalSettings, TokenOptimizationSettings
 from .context import ContextBuilder
 from .logging_config import get_logger
-from .message_utils import (
+from .message_utils import (  # noqa: F401 - re-exported for tests
     _apply_context_compaction_strategy,
     _base_system_prompt,
     _build_summary_fallback,
@@ -64,6 +64,7 @@ from .message_utils import (
     _route_for_history,
     _should_defer_summary_update,
     _to_text_content,
+    _truncate_text_preserving_edges,
     normalize_messages_for_llm,
     sanitize_messages_for_llm,
 )
