@@ -16,10 +16,23 @@ from langgraph.graph.message import add_messages
 from w_bot.utils.helpers import _tool_result_to_text
 
 from ..intent import IntentClassifier, ToolRegistry
-from ..intent.intent_detection import (
+from ..intent.intent_detection import (  # noqa: F401 - re-exported for tests
+    _contains_any,
     _continue_current_task_prompt,
+    _has_tool_messages_since_last_human,
+    _looks_like_capability_question,
+    _looks_like_casual_chat,
+    _looks_like_cron_request,
+    _looks_like_exec_request,
+    _looks_like_file_edit_request,
+    _looks_like_file_read_request,
+    _looks_like_message_request,
+    _looks_like_project_inspection_request,
+    _looks_like_spawn_request,
+    _looks_like_web_request,
     _response_looks_incomplete,
     _should_check_completion_for_turn,
+    _should_enable_tools_for_text,
     _should_expose_run_skill,
 )
 from ..memory.memory import LongTermMemoryStore
