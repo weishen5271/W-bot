@@ -2,8 +2,8 @@
 """HTML to PDF converter using Playwright."""
 
 import argparse
-import sys
 import asyncio
+import sys
 from pathlib import Path
 
 

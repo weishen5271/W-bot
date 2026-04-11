@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import pytest
-
 from w_bot.agents.intent.intent_heuristic import (
     _contains_any,
-    _looks_like_casual_chat,
     _looks_like_capability_question,
-    _looks_like_project_inspection_request,
-    _looks_like_file_read_request,
-    _looks_like_file_edit_request,
-    _looks_like_web_request,
+    _looks_like_casual_chat,
     _looks_like_exec_request,
+    _looks_like_file_edit_request,
+    _looks_like_file_read_request,
+    _looks_like_project_inspection_request,
     _looks_like_spawn_request,
-    _should_expose_run_skill,
-    _should_enable_tools_for_text,
+    _looks_like_web_request,
     _should_check_completion_for_turn,
+    _should_enable_tools_for_text,
+    _should_expose_run_skill,
 )
 
 

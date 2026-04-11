@@ -5,10 +5,10 @@ the intent behind their message using keyword matching heuristics.
 Used as the fast path in the two-stage intent classification.
 """
 
-from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
-from typing import Any
 
-from .intent import IntentType, IntentDecision, IntentResult, ToolRecommendation
+from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
+
+from .intent import IntentDecision, IntentResult, IntentType, ToolRecommendation
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:

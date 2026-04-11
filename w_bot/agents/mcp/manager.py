@@ -9,15 +9,14 @@ from enum import Enum
 from typing import Any
 
 from ..core.logging_config import get_logger
-from ..tools.common import http_get_json, http_post_json, sanitize_tool_token
+from ..tools.common import http_get_json
 from .protocol import (
-    MCPTransport,
     HTTPTransport,
-    SSETransport,
-    StreamableHTTPTransport,
-    StdioTransport,
-    create_transport,
     MCPTool,
+    MCPTransport,
+    SSETransport,
+    StdioTransport,
+    StreamableHTTPTransport,
 )
 
 logger = get_logger(__name__)

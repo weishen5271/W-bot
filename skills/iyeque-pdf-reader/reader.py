@@ -1,7 +1,8 @@
-import sys
 import argparse
 import json
+
 import pymupdf
+
 
 def extract_text(file_path, max_pages=None):
     try:

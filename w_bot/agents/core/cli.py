@@ -18,37 +18,35 @@ from langchain_openai import ChatOpenAI
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from w_bot.utils.helpers import _shorten_text
+
+from ..memory.memory import LongTermMemoryStore
+from ..skills.skills import SkillsLoader
+from ..tools.runtime import build_tools
 from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
 from .config import DEFAULT_APP_CONFIG_PATH, Settings, load_settings
-from .escalation import _render_escalation_request, EscalationManager, EscalationRequest
+from .escalation import EscalationManager, EscalationRequest, _render_escalation_request
 from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
-from ..memory.memory import LongTermMemoryStore
 from .openclaw_profile import OpenClawProfileLoader
 from .provider_factory import build_langchain_llm
 from .runtime_status import RuntimeStatusSnapshot
 from .session_store import (
-    RECENT_SESSIONS_LIMIT,
     SessionRecord,
     SessionStateStore,
 )
-from ..skills.skills import SkillsLoader
 from .streaming import (
     _latest_ai_reply_from_result,
     _message_to_text,
-    latest_non_tool_ai_reply,
-    normalize_reasoning_text,
     normalize_display_text,
+    normalize_reasoning_text,
 )
-from w_bot.utils.helpers import _shorten_text
 from .text_sanitizer import sanitize_user_text
 from .token_tracker import extract_token_usage
-from ..tools.runtime import build_tools
 
 console = Console()
 logger = get_logger(__name__)
@@ -65,8 +63,8 @@ try:
     from prompt_toolkit.key_binding.key_processor import KeyPressEvent
     from prompt_toolkit.layout import Layout
     from prompt_toolkit.layout.containers import HSplit
-    from prompt_toolkit.patch_stdout import patch_stdout
     from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.patch_stdout import patch_stdout
     from prompt_toolkit.styles import Style
     from prompt_toolkit.widgets import Box, Button, Dialog, Frame, Label, TextArea
 except Exception:  # pragma: no cover - graceful fallback when dependency is unavailable

@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import MagicMock
-
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from w_bot.agents.core.tool_analysis import (
-    _summarize_tool_calls,
-    _count_tool_steps_since_last_human,
     _count_named_tool_calls_since_last_human,
-    _same_tool_call_streak,
-    _tool_call_signature,
-    _is_tool_failure_content,
-    _extract_tool_failure_summary,
+    _count_tool_steps_since_last_human,
     _extract_exit_code,
+    _extract_tool_failure_summary,
+    _is_tool_failure_content,
+    _same_tool_call_streak,
+    _summarize_tool_calls,
+    _tool_call_signature,
 )
 
 

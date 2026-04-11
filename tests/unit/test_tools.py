@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
+
 from w_bot.agents.tools.base import FunctionTool, Tool
 from w_bot.agents.tools.filesystem import (
     EditFileTool,
@@ -192,7 +192,6 @@ class TestWriteFileTool:
     async def test_write_overwrites_existing(self, tool: WriteFileTool, temp_workspace: Path) -> None:
         """Test writing overwrites existing file."""
         existing_file = temp_workspace / "test_file.txt"
-        original = existing_file.read_text()
         result = await tool.execute(path=str(existing_file), content="overwritten content")
         assert "Successfully wrote" in result
         assert existing_file.read_text() == "overwritten content"
@@ -432,18 +431,15 @@ class TestToolBaseClass:
 
     def test_resolve_type_string(self) -> None:
         """Test _resolve_type with string input."""
-        from w_bot.agents.tools.base import Tool
         result = Tool._resolve_type("string")
         assert result == "string"
 
     def test_resolve_type_list_with_null(self) -> None:
         """Test _resolve_type with list containing null."""
-        from w_bot.agents.tools.base import Tool
         result = Tool._resolve_type(["string", "null"])
         assert result == "string"
 
     def test_resolve_type_non_string(self) -> None:
         """Test _resolve_type with non-string input returns None."""
-        from w_bot.agents.tools.base import Tool
         result = Tool._resolve_type(123)
         assert result is None

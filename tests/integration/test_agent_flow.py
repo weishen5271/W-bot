@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
@@ -94,7 +94,6 @@ class TestAgentFlowIntegration:
 
     def test_tool_call_flow(self) -> None:
         """Test message flow with tool calls."""
-        from w_bot.agents.core.agent import AgentState
         from w_bot.agents.core.tool_analysis import _summarize_tool_calls
 
         messages = [
@@ -113,7 +112,6 @@ class TestAgentFlowIntegration:
 
     def test_error_recovery_flow(self) -> None:
         """Test error handling in the message flow."""
-        from w_bot.agents.core.agent import AgentState
         from w_bot.agents.core.runtime_status import RuntimeStatusSnapshot
 
         # Simulate a failed tool call
@@ -132,7 +130,6 @@ class TestAgentFlowIntegration:
 
     def test_token_tracking_flow(self) -> None:
         """Test token usage tracking across messages."""
-        from w_bot.agents.core.agent import AgentState
         from w_bot.agents.core.runtime_status import RuntimeStatusSnapshot
 
         snapshot = RuntimeStatusSnapshot(session_id="test-session")
@@ -149,7 +146,6 @@ class TestAgentFlowIntegration:
 
     def test_context_compaction_flow(self) -> None:
         """Test context compaction trigger and execution."""
-        from w_bot.agents.core.agent import AgentState
         from w_bot.agents.core.message_utils import _determine_compaction_level
 
         # Normal state

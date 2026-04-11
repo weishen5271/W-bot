@@ -5,8 +5,8 @@ the intent behind their message, such as whether they want to execute code,
 read files, edit files, spawn subagents, send messages, schedule cron jobs, etc.
 """
 
+
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
-from typing import Any
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, patch
+
 from w_bot.agents.core.agent import (
-    _tool_args_preview,
-    _tool_progress_emoji,
-    _tool_progress_action,
     AgentState,
+    _tool_args_preview,
+    _tool_progress_action,
+    _tool_progress_emoji,
 )
 
 
@@ -142,7 +142,6 @@ class TestAgentImports:
         from w_bot.agents.core.agent import (
             AgentState,
             ScheduledGraphApp,
-            WBotGraph,
         )
         assert AgentState is not None
         assert ScheduledGraphApp is not None
@@ -150,17 +149,8 @@ class TestAgentImports:
     def test_intent_detection_imports(self) -> None:
         """Test intent detection functions are importable."""
         from w_bot.agents.core.agent import (
-            _should_enable_tools_for_text,
             _should_check_completion_for_turn,
-            _has_tool_messages_since_last_human,
-            _response_looks_incomplete,
-            _looks_like_casual_chat,
-            _looks_like_capability_question,
-            _looks_like_file_read_request,
-            _looks_like_file_edit_request,
-            _looks_like_web_request,
-            _looks_like_exec_request,
-            _looks_like_spawn_request,
+            _should_enable_tools_for_text,
         )
         assert callable(_should_enable_tools_for_text)
         assert callable(_should_check_completion_for_turn)
@@ -170,10 +160,6 @@ class TestAgentImports:
         from w_bot.agents.core.agent import (
             _extract_last_user_message,
             _merge_token_usage_dicts,
-            _format_token_budget_snapshot,
-            _truncate_text_preserving_edges,
-            _last_human_index,
-            _build_summary_fallback,
         )
         assert callable(_extract_last_user_message)
         assert callable(_merge_token_usage_dicts)
@@ -181,12 +167,8 @@ class TestAgentImports:
     def test_tool_analysis_imports(self) -> None:
         """Test tool analysis functions are importable."""
         from w_bot.agents.core.agent import (
-            _summarize_tool_calls,
             _count_tool_steps_since_last_human,
-            _same_tool_call_streak,
-            _is_tool_failure_content,
-            _extract_tool_failure_summary,
-            _extract_exit_code,
+            _summarize_tool_calls,
         )
         assert callable(_summarize_tool_calls)
         assert callable(_count_tool_steps_since_last_human)
@@ -197,8 +179,9 @@ class TestMessageUtils:
 
     def test_extract_last_user_message(self) -> None:
         """Test extracting last user message from message list."""
+        from langchain_core.messages import AIMessage, HumanMessage
+
         from w_bot.agents.core.agent import _extract_last_user_message
-        from langchain_core.messages import HumanMessage, AIMessage
 
         messages = [
             AIMessage(content="Hello"),

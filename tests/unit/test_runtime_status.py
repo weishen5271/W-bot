@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from w_bot.agents.core.runtime_status import (
     RuntimeStatusSnapshot,
     TaskBoardStatus,

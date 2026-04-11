@@ -8,11 +8,11 @@ from typing import Any
 
 from langchain_core.messages import AnyMessage
 
-from .intent import IntentResult, ToolRecommendation
-from .intent_heuristic import heuristic_classify, _should_expose_run_skill
-from .intent_llm import _llm_classify_async, llm_classify_sync
 from ..core.config import IntentClassifierSettings
 from ..core.logging_config import get_logger
+from .intent import IntentResult
+from .intent_heuristic import _should_expose_run_skill, heuristic_classify
+from .intent_llm import _llm_classify_async, llm_classify_sync
 
 logger = get_logger(__name__)
 

@@ -232,12 +232,12 @@ def main() -> None:
             print(f"- {record.session_id} ({record.updated_at})")
     elif mode == "mcp":
         from w_bot.agents.mcp.cli import (
-            run_mcp_command,
+            add_stdio_server,
             health_daemon,
+            restart_server,
+            run_mcp_command,
             start_server,
             stop_server,
-            restart_server,
-            add_stdio_server,
         )
         if args.mcp_command == "healthd":
             health_daemon.callback(config=args.config, interval=args.interval)

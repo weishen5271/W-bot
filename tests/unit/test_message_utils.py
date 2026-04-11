@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from w_bot.agents.core.message_utils import (
-    _extract_last_user_message,
     _determine_compaction_level,
+    _extract_last_user_message,
     _last_human_index,
     message_kind,
-    sanitize_messages_for_llm,
     normalize_messages_for_llm,
+    sanitize_messages_for_llm,
 )
 
 

@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
-import platform
-import sys
-import time
-from collections import defaultdict
 import threading
+import time
+from pathlib import Path
 from typing import Annotated, Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -15,88 +12,62 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from .config import MultimodalSettings, TokenOptimizationSettings, IntentClassifierSettings
-from .context import ContextBuilder
+
+from w_bot.utils.helpers import _tool_result_to_text
+
 from ..intent import IntentClassifier, ToolRegistry
 from ..intent.intent_detection import (
-    _should_enable_tools_for_text,
-    _should_check_completion_for_turn,
-    _has_tool_messages_since_last_human,
-    _response_looks_incomplete,
     _continue_current_task_prompt,
-    _looks_like_casual_chat,
-    _looks_like_capability_question,
-    _looks_like_project_inspection_request,
-    _looks_like_file_read_request,
-    _looks_like_file_edit_request,
-    _looks_like_web_request,
-    _looks_like_exec_request,
-    _looks_like_spawn_request,
+    _response_looks_incomplete,
+    _should_check_completion_for_turn,
     _should_expose_run_skill,
-    _looks_like_message_request,
-    _looks_like_cron_request,
-    _contains_any,
 )
-from .logging_config import get_logger
 from ..memory.memory import LongTermMemoryStore
-from .message_utils import (
-    _extract_last_user_message,
-    _merge_token_usage_dicts,
-    _format_token_budget_snapshot,
-    _determine_compaction_level,
-    _apply_context_compaction_strategy,
-    _clone_message_with_truncated_content,
-    _truncate_text_preserving_edges,
-    _last_human_index,
-    _build_summary_fallback,
-    _base_system_prompt,
-    message_kind,
-    sanitize_messages_for_llm,
-    _extract_tool_call_ids,
-    normalize_messages_for_llm,
-    _human_blocks_to_text,
-    _route_for_history,
-    _is_messages_length_error,
-    _resolve_stream_token_callback,
-    _resolve_status_callback,
-    _resolve_tool_progress_callback,
-    _resolve_debug_callback,
-    _emit_status,
-    _resolve_thread_id,
-    _should_defer_summary_update,
-    _to_text_content,
-    _has_native_image_blocks,
-    _recent_window_start,
-    _messages_to_summary_text,
-)
-from ..multimodal import MultimodalNormalizer, MultimodalRuntimeConfig, parse_human_payload
-from .openclaw_profile import OpenClawProfileLoader
+from ..multimodal import MultimodalNormalizer, MultimodalRuntimeConfig
 from ..providers import resolve_provider_capabilities
 from ..skills.skills import SkillsLoader
+from ..skills.subagent import SubagentManager
+from .config import IntentClassifierSettings, MultimodalSettings, TokenOptimizationSettings
+from .context import ContextBuilder
+from .logging_config import get_logger
+from .message_utils import (
+    _apply_context_compaction_strategy,
+    _base_system_prompt,
+    _build_summary_fallback,
+    _determine_compaction_level,
+    _emit_status,
+    _extract_last_user_message,
+    _format_token_budget_snapshot,
+    _has_native_image_blocks,
+    _is_messages_length_error,
+    _merge_token_usage_dicts,
+    _messages_to_summary_text,
+    _recent_window_start,
+    _resolve_debug_callback,
+    _resolve_status_callback,
+    _resolve_stream_token_callback,
+    _resolve_thread_id,
+    _resolve_tool_progress_callback,
+    _route_for_history,
+    _should_defer_summary_update,
+    _to_text_content,
+    normalize_messages_for_llm,
+    sanitize_messages_for_llm,
+)
+from .openclaw_profile import OpenClawProfileLoader
 from .streaming_utils import (
     _invoke_llm_with_optional_stream,
-    _invoke_openai_compatible_direct_stream,
-    _extract_stream_chunk_text,
-    _extract_stream_chunk_reasoning,
-    _to_stream_text_content,
-    _to_stream_reasoning_content,
 )
-from ..skills.subagent import SubagentManager
 from .token_tracker import TokenBudgetManager, extract_token_usage, token_count_with_estimation
 from .tool_analysis import (
-    _summarize_tool_calls,
-    _count_tool_steps_since_last_human,
-    _count_named_tool_calls_since_last_human,
-    _same_tool_call_streak,
-    _tool_call_signature,
-    _is_tool_failure_content,
-    _extract_tool_failure_summary,
-    _extract_exit_code,
     _build_text_only_retry_messages,
+    _count_tool_steps_since_last_human,
+    _extract_tool_failure_summary,
+    _is_tool_failure_content,
     _runtime_error_reply_text,
-    _format_exception_brief,
+    _same_tool_call_streak,
+    _summarize_tool_calls,
 )
-from w_bot.utils.helpers import _tool_result_to_text
 
 logger = get_logger(__name__)
 

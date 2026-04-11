@@ -6,8 +6,8 @@ from collections import defaultdict
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, AnyMessage
+
 from .logging_config import get_logger
-from w_bot.utils.helpers import _tool_result_to_text
 
 logger = get_logger(__name__)
 

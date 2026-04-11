@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -61,8 +57,9 @@ class TestSettings:
 
     def test_settings_immutable(self) -> None:
         """Test Settings is a frozen dataclass (immutable)."""
-        from w_bot.agents.core.config import Settings
         from dataclasses import FrozenInstanceError
+
+        from w_bot.agents.core.config import Settings
 
         settings = Settings(
             model_provider="openai",

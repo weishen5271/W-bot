@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from importlib import resources
-import shutil
 from pathlib import Path
 
 from .logging_config import get_logger

@@ -6,7 +6,9 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
+
+from ..core.logging_config import get_logger
 
 
 @dataclass
@@ -494,7 +496,4 @@ def create_transport(
 
     return transport_class(**kwargs)
 
-
-# Module-level logger
-from ..core.logging_config import get_logger
 logger = get_logger(__name__)

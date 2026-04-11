@@ -9,8 +9,8 @@ from ..memory.memory import LongTermMemoryStore
 from .base import Tool
 from .cron import CronTool
 from .filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from .memory_tool import SaveMemoryTool
 from .mcp import build_mcp_tools
+from .memory_tool import SaveMemoryTool
 from .message import MessageTool
 from .registry import ToolRegistry
 from .shell import ExecTool

@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata, CheckpointTuple, get_checkpoint_id, get_checkpoint_metadata
-from langgraph.checkpoint.memory import InMemorySaver, WRITES_IDX_MAP
+from langgraph.checkpoint.memory import WRITES_IDX_MAP, InMemorySaver
 
 from .logging_config import get_logger
 

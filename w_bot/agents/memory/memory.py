@@ -6,7 +6,6 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
 from langchain_core.documents import Document
 

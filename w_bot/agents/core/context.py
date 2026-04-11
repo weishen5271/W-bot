@@ -5,9 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from ..skills.skills import SkillsLoader
 from .config import TokenOptimizationSettings
 from .openclaw_profile import OpenClawProfileLoader
-from ..skills.skills import SkillsLoader
 
 
 class ContextBuilder:

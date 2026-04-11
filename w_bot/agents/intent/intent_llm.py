@@ -4,14 +4,14 @@ This module implements LLM-based intent classification as Stage 2
 of the two-stage intent classification system.
 """
 
-import json
 import asyncio
+import json
 from typing import Any
 
-from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 
-from .intent import IntentType, IntentDecision, IntentResult, ToolRecommendation
 from ..core.logging_config import get_logger
+from .intent import IntentDecision, IntentResult, IntentType, ToolRecommendation
 
 logger = get_logger(__name__)
 
