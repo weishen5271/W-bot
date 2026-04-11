@@ -222,7 +222,7 @@ def load_settings(
             merged,
             "shortTermMemoryPath",
             "short_term_memory_path",
-            default="memory/short_term_memory.pkl",
+            default="memory/short_term_memory.sqlite",
         ),
         user_id=_string_value(merged, "userId", "user_id", default="cli_user"),
         session_id=_string_value(
@@ -574,7 +574,7 @@ def default_app_config() -> dict[str, Any]:
             "milvusUri": "http://<host>:19530",
             "memoryCollection": "w_bot_long_term_memory_cli",
             "memoryFilePath": "memory/MEMORY.md",
-            "shortTermMemoryPath": "memory/short_term_memory.pkl",
+            "shortTermMemoryPath": "memory/short_term_memory.sqlite",
             "userId": "feishu_bot",
             "sessionId": "",
             "sessionStateFilePath": DEFAULT_SESSION_STATE_FILE_PATH,

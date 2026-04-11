@@ -81,8 +81,47 @@ class StreamTextAssembler:
         return payload
 
 
+def split_think_content(text: str | None) -> tuple[str, str]:
+    raw = str(text or "")
+    if not raw:
+        return "", ""
+
+    lower = raw.lower()
+    answer_pieces: list[str] = []
+    reasoning_pieces: list[str] = []
+    cursor = 0
+    while True:
+        start = lower.find("<think>", cursor)
+        if start < 0:
+            answer_pieces.append(raw[cursor:])
+            break
+        answer_pieces.append(raw[cursor:start])
+        end = lower.find("</think>", start + len("<think>"))
+        if end < 0:
+            reasoning_pieces.append(raw[start + len("<think>"):])
+            break
+        reasoning_pieces.append(raw[start + len("<think>"):end])
+        cursor = end + len("</think>")
+    answer = "".join(answer_pieces).replace("</think>", "").replace("<think>", "")
+    reasoning = "\n\n".join(part.strip() for part in reasoning_pieces if str(part).strip())
+    return reasoning, answer
+
+
+def _strip_think_blocks(text: str | None) -> str:
+    _, answer = split_think_content(text)
+    return answer
+
+
+def normalize_reasoning_text(text: str | None) -> str:
+    reasoning, _ = split_think_content(text)
+    payload = _normalize_control_chars(reasoning)
+    while "\n\n\n" in payload:
+        payload = payload.replace("\n\n\n", "\n\n")
+    return payload.strip()
+
+
 def normalize_display_text(text: str | None) -> str:
-    payload = _normalize_control_chars(text)
+    payload = _normalize_control_chars(_strip_think_blocks(text))
     while "\n\n\n" in payload:
         payload = payload.replace("\n\n\n", "\n\n")
     return payload

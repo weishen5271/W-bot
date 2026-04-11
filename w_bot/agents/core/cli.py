@@ -42,6 +42,7 @@ from .streaming import (
     _latest_ai_reply_from_result,
     _message_to_text,
     latest_non_tool_ai_reply,
+    normalize_reasoning_text,
     normalize_display_text,
 )
 from w_bot.utils.helpers import _shorten_text
@@ -207,7 +208,8 @@ class CliStreamRenderer:
         self._console = console_obj
         self._render_markdown = render_markdown
         self._runtime_status = runtime_status
-        self._live_enabled = False
+        self._live_enabled = _supports_live_render(console_obj)
+        self._live: Live | None = None
         self._spinner = CliThinkingSpinner(
             console_obj,
             runtime_status=runtime_status,
@@ -229,6 +231,10 @@ class CliStreamRenderer:
         self._recent_tool_lines: list[str] = []
         self._stream_box_opened = False
         self._stream_buf = ""
+        self._raw_answer_buffer = ""
+        self._raw_reasoning_rendered = ""
+        self._reasoning_stream_buf = ""
+        self._reasoning_started = False
 
     def _push_tool_line(self, line: str, *, raw_status: str | None = None, spinner_text: str | None = None) -> None:
         text = str(line or "").rstrip()
@@ -246,16 +252,36 @@ class CliStreamRenderer:
     def _open_stream_box(self) -> None:
         if self._stream_box_opened:
             return
-        width = max(20, self._console.size.width)
-        label = " W-bot "
-        fill = max(0, width - 2 - len(label))
         self._spinner.stop()
         self._console.print()
-        self._console.print(f"╭─{label}{'─' * max(fill - 1, 0)}╮")
+        if self._live_enabled:
+            self._live = Live(
+                self._build_stream_renderable(),
+                console=self._console,
+                refresh_per_second=12,
+                transient=False,
+            )
+            self._live.start()
+        else:
+            width = max(20, self._console.size.width)
+            label = " W-bot "
+            fill = max(0, width - 2 - len(label))
+            self._console.print(f"╭─{label}{'─' * max(fill - 1, 0)}╮")
         self._stream_box_opened = True
         self.stream_started = True
 
     def _flush_stream(self) -> None:
+        if self._live_enabled:
+            if self._live is not None:
+                self._live.update(self._build_stream_renderable(), refresh=True)
+                self._live.stop()
+                self._live = None
+            self._stream_box_opened = False
+            self._reasoning_started = False
+            return
+        if self._reasoning_stream_buf:
+            self._console.print(Text(self._reasoning_stream_buf, style="italic cyan"))
+            self._reasoning_stream_buf = ""
         if self._stream_buf:
             self._console.print(self._stream_buf)
             self._stream_buf = ""
@@ -263,6 +289,31 @@ class CliStreamRenderer:
             width = max(20, self._console.size.width)
             self._console.print(f"╰{'─' * (width - 2)}╯")
             self._stream_box_opened = False
+            self._reasoning_started = False
+
+    def _build_stream_renderable(self) -> Panel:
+        reasoning_text = self._reasoning_stream_buf.strip()
+        answer_text = self._stream_buf.strip()
+        reasoning_renderable: Any
+        answer_renderable: Any
+        if reasoning_text:
+            reasoning_renderable = Text(reasoning_text, style="italic cyan")
+        else:
+            reasoning_renderable = Text("等待思考输出...", style="dim")
+        if answer_text:
+            answer_renderable = Text(answer_text)
+        else:
+            answer_renderable = Text("等待回答输出...", style="dim")
+        body = Group(
+            Panel(reasoning_renderable, title="思考", border_style="cyan", padding=(0, 1)),
+            Panel(answer_renderable, title="回答", border_style="green", padding=(0, 1)),
+        )
+        return Panel(body, title="W-bot", border_style="cyan", padding=(0, 1))
+
+    def _refresh_live_render(self) -> None:
+        if not self._live_enabled or self._live is None or not self._stream_box_opened:
+            return
+        self._live.update(self._build_stream_renderable(), refresh=True)
 
     def update_status(self, text: str) -> None:
         raw = str(text or "")
@@ -326,10 +377,36 @@ class CliStreamRenderer:
             if not visible:
                 return
             self._open_stream_box()
+        if self._live_enabled:
+            self._stream_buf += visible
+            self._refresh_live_render()
+            return
         self._stream_buf += visible
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
             self._console.print(line)
+
+    def _emit_reasoning_text(self, text: str) -> None:
+        if not text:
+            return
+        visible = str(text)
+        if not self._stream_box_opened:
+            visible = visible.lstrip("\n")
+            if not visible:
+                return
+            self._open_stream_box()
+        if self._live_enabled:
+            self._reasoning_stream_buf += visible
+            self._reasoning_started = True
+            self._refresh_live_render()
+            return
+        if not self._reasoning_started:
+            self._console.print(Text("思考：", style="bold cyan"))
+            self._reasoning_started = True
+        self._reasoning_stream_buf += visible
+        while "\n" in self._reasoning_stream_buf:
+            line, self._reasoning_stream_buf = self._reasoning_stream_buf.split("\n", 1)
+            self._console.print(Text(line, style="italic cyan"))
 
     def on_delta(self, delta: Any) -> None:
         payload = delta
@@ -344,8 +421,23 @@ class CliStreamRenderer:
         if not payload:
             return
         self._last_token_at = time.monotonic()
-        self._buffer = normalize_display_text(self._buffer + str(payload))
-        self._emit_stream_text(str(payload))
+        self._raw_answer_buffer += str(payload)
+        current_reasoning = normalize_reasoning_text(self._raw_answer_buffer)
+        previous_reasoning = self._raw_reasoning_rendered
+        if current_reasoning.startswith(previous_reasoning):
+            reasoning_delta = current_reasoning[len(previous_reasoning):]
+        else:
+            reasoning_delta = current_reasoning
+        self._raw_reasoning_rendered = current_reasoning
+        self._emit_reasoning_text(reasoning_delta)
+        previous = self._buffer
+        current = normalize_display_text(self._raw_answer_buffer)
+        self._buffer = current
+        if current.startswith(previous):
+            visible_delta = current[len(previous):]
+        else:
+            visible_delta = current
+        self._emit_stream_text(visible_delta)
 
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(1.0):
@@ -354,10 +446,15 @@ class CliStreamRenderer:
     def finish(self, final_text: str = "") -> None:
         self._closed.set()
         self._status_line = ""
-        final_payload = final_text or self._buffer
+        final_payload = final_text or self._raw_answer_buffer or self._buffer
         if final_payload and not self.stream_started:
-            self._buffer = normalize_display_text(final_payload)
-            self._emit_stream_text(final_payload)
+            self._raw_answer_buffer = str(final_payload)
+            self._raw_reasoning_rendered = normalize_reasoning_text(self._raw_answer_buffer)
+            self._buffer = normalize_display_text(self._raw_answer_buffer)
+            if self._raw_reasoning_rendered:
+                self._emit_reasoning_text(self._raw_reasoning_rendered)
+                self._raw_reasoning_rendered = ""
+            self._emit_stream_text(self._buffer)
         self._flush_stream()
         self._spinner.stop()
         self._console.print()

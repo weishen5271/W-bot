@@ -366,6 +366,36 @@
     return lines.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
+  function splitThinkContent(text) {
+    const normalized = normalizeDisplayText(text);
+    const lower = normalized.toLowerCase();
+    let result = "";
+    let reasoning = "";
+    let cursor2 = 0;
+    while (true) {
+      const start = lower.indexOf("<think>", cursor2);
+      if (start < 0) {
+        result += normalized.slice(cursor2);
+        break;
+      }
+      result += normalized.slice(cursor2, start);
+      const end = lower.indexOf("</think>", start + "<think>".length);
+      if (end < 0) {
+        reasoning += (reasoning ? "\n\n" : "") + normalized.slice(start + "<think>".length).trim();
+        break;
+      }
+      const thinkBody = normalized.slice(start + "<think>".length, end).trim();
+      if (thinkBody) {
+        reasoning += (reasoning ? "\n\n" : "") + thinkBody;
+      }
+      cursor2 = end + "</think>".length;
+    }
+    return {
+      reasoning: reasoning.replace(/<\/?think>/gi, "").replace(/\n{3,}/g, "\n\n").trim(),
+      answer: result.replace(/<\/?think>/gi, "").replace(/\n{3,}/g, "\n\n")
+    };
+  }
+
   function createAssistantCard() {
     const card = document.createElement("div");
     card.className = "assistant-card";
@@ -461,6 +491,7 @@
     const botMessageById = new Map();
     let activeBotMsgEl = assistantCard.text;
 
+    let streamRawText = "";
     let streamText = "";
     let streamReasoningText = "";
     let pendingRenderText = "";
@@ -524,8 +555,12 @@
         if (!activeBotMsgEl) {
           activeBotMsgEl = assistantCard.text;
         }
-        streamText += pendingRenderText;
+        streamRawText += pendingRenderText;
         pendingRenderText = "";
+        const split = splitThinkContent(streamRawText);
+        streamReasoningText = split.reasoning;
+        streamText = split.answer;
+        assistantCard.reasoning.textContent = normalizeDisplayText(streamReasoningText);
         activeBotMsgEl.textContent = normalizeDisplayText(streamText);
       }
       scrollToBottomIfNeeded(stickToBottom);
@@ -653,17 +688,23 @@
             if (msgId && botMessageById.has(msgId)) {
               const existing = botMessageById.get(msgId);
               const stickToBottom = shouldStickToBottom();
-              const normalizedText = normalizeDisplayText(msgText);
-              existing.textContent = normalizedText;
-              streamText = normalizedText;
+              const split = splitThinkContent(msgText);
+              existing.textContent = normalizeDisplayText(split.answer);
+              assistantCard.reasoning.textContent = normalizeDisplayText(split.reasoning);
+              streamRawText = msgText;
+              streamReasoningText = split.reasoning;
+              streamText = split.answer;
               activeBotMsgEl = existing;
               scrollToBottomIfNeeded(stickToBottom);
             } else {
               const nextEl = assistantCard.text;
               const stickToBottom = shouldStickToBottom();
-              const normalizedText = normalizeDisplayText(msgText);
-              nextEl.textContent = normalizedText;
-              streamText = normalizedText;
+              const split = splitThinkContent(msgText);
+              nextEl.textContent = normalizeDisplayText(split.answer);
+              assistantCard.reasoning.textContent = normalizeDisplayText(split.reasoning);
+              streamRawText = msgText;
+              streamReasoningText = split.reasoning;
+              streamText = split.answer;
               if (msgId) {
                 botMessageById.set(msgId, nextEl);
               }
@@ -674,16 +715,22 @@
             pendingStatusText = parsed.text;
             assistantCard.phase.textContent = pendingStatusText;
           } else if (event === "done") {
-            finalReply = normalizeDisplayText(parsed.reply || finalReply);
+            finalReply = String(parsed.reply || finalReply || "");
             stopThinking();
             flushRender(true);
             if (finalReply) {
               if (!activeBotMsgEl) {
                 activeBotMsgEl = assistantCard.text;
               }
-              if (normalizeDisplayText(activeBotMsgEl.textContent || "") !== finalReply) {
-                streamText = finalReply;
-                activeBotMsgEl.textContent = finalReply;
+              const split = splitThinkContent(finalReply);
+              const finalAnswer = normalizeDisplayText(split.answer);
+              const finalReasoning = normalizeDisplayText(split.reasoning);
+              if (normalizeDisplayText(activeBotMsgEl.textContent || "") !== finalAnswer) {
+                streamRawText = parsed.reply || finalReply;
+                streamReasoningText = split.reasoning;
+                streamText = split.answer;
+                assistantCard.reasoning.textContent = finalReasoning;
+                activeBotMsgEl.textContent = finalAnswer;
               }
             }
             assistantCard.phase.textContent = "处理完成";
@@ -701,12 +748,16 @@
       flushRender(true);
 
       if ((!activeBotMsgEl || !activeBotMsgEl.textContent) && finalReply) {
-        streamText = normalizeDisplayText(finalReply);
+        streamRawText = finalReply;
+        const split = splitThinkContent(finalReply);
+        streamReasoningText = split.reasoning;
+        streamText = split.answer;
+        assistantCard.reasoning.textContent = normalizeDisplayText(streamReasoningText);
         if (!activeBotMsgEl) {
           activeBotMsgEl = assistantCard.text;
-          activeBotMsgEl.textContent = streamText;
+          activeBotMsgEl.textContent = normalizeDisplayText(streamText);
         } else {
-          activeBotMsgEl.textContent = streamText;
+          activeBotMsgEl.textContent = normalizeDisplayText(streamText);
         }
       }
     } catch (err) {

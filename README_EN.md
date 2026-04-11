@@ -29,7 +29,7 @@ At this point, the project is no longer just a CLI agent. It is a multi-entry ag
 
 ### 2. Sessions and Memory
 
-- Short-term memory is persisted to `memory/short_term_memory.pkl`
+- Short-term memory is persisted to `memory/short_term_memory.sqlite`
 - Long-term memory defaults to `memory/MEMORY.md`
 - The CLI automatically resumes the most recent session
 - You can list, resume, and create sessions explicitly
@@ -248,7 +248,7 @@ All runtime settings live in `configs/app.json`. The top-level structure looks l
 Common fields:
 
 - `memoryFilePath`: long-term memory file, default `memory/MEMORY.md`
-- `shortTermMemoryPath`: short-term memory file, default `memory/short_term_memory.pkl`
+- `shortTermMemoryPath`: short-term memory file, default `memory/short_term_memory.sqlite`
 - `sessionStateFilePath`: CLI session state file, default `configs/session_state.json`
 - `escalationStateFilePath`: escalation request state file, default `configs/escalations.json`
 - `retrieveTopK`: number of memory retrieval hits

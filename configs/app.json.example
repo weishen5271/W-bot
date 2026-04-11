@@ -4,7 +4,7 @@
     "milvusUri": "http://<host>:19530",
     "memoryCollection": "w_bot_long_term_memory_cli",
     "memoryFilePath": "memory/MEMORY.md",
-    "shortTermMemoryPath": "memory/short_term_memory.pkl",
+    "shortTermMemoryPath": "memory/short_term_memory.sqlite",
     "userId": "cli_user",
     "sessionId": "",
     "sessionStateFilePath": "configs/session_state.json",
