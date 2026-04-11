@@ -239,6 +239,12 @@ class FeishuGateway:
             self._add_reaction(message_id=message_id, emoji_type=self._config.react_emoji)
 
         session_key = chat_id if chat_type == "group" else (open_id or chat_id)
+        with self._session_lock:
+            session_id = self._session_overrides.get(
+                session_key,
+                f"{self._thread_prefix}:{session_key}",
+            )
+
         if self._is_new_session_command(text):
             session_id = f"{self._thread_prefix}:{session_key}:{int(time.time() * 1000)}"
             with self._session_lock:
@@ -260,12 +266,6 @@ class FeishuGateway:
                 reply_to_message_id=message_id if self._config.reply_to_message else "",
             )
             return
-
-        with self._session_lock:
-            session_id = self._session_overrides.get(
-                session_key,
-                f"{self._thread_prefix}:{session_key}",
-            )
         inbound = InboundMessage(content=text, media=media)
         reply_text = self._ask_agent(inbound=inbound, session_id=session_id)
         if not reply_text.strip():
