@@ -1,17 +1,59 @@
-version: '3.8'
-
 services:
-  postgres:
-    image: postgres:15
-    container_name: w-bot-postgres
-    environment:
-      POSTGRES_USER: agent_user
-      POSTGRES_PASSWORD: agent_password
-      POSTGRES_DB: w_bot_agent
+  web:
+    image: python:3.11-slim
+    container_name: w-bot-web
+    working_dir: /app
+    restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "8000:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      WBOT_CONFIG_PATH: /app/configs/app.docker.json
+      MILVUS_URI: ""
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./:/app
+      - wbot-pip-cache:/root/.cache/pip
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -e
+        if [ ! -f /app/configs/app.json ]; then
+          cp /app/configs/app.json.example /app/configs/app.json
+        fi
+        python -c 'import json, os; from pathlib import Path; src = Path("/app/configs/app.json"); dst = Path(os.environ["WBOT_CONFIG_PATH"]); data = json.loads(src.read_text(encoding="utf-8")); data.setdefault("channels", {}).setdefault("web", {})["host"] = "0.0.0.0"; data["channels"]["web"]["port"] = int(data["channels"]["web"].get("port", 8000) or 8000); milvus_uri = os.environ.get("MILVUS_URI", "").strip(); agent = data.setdefault("agent", {}); agent["milvusUri"] = milvus_uri or agent.get("milvusUri", ""); dst.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")'
+        python -m pip install --upgrade pip
+        pip install -e .
+        exec wbot web --config "$WBOT_CONFIG_PATH"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  milvus:
+    image: milvusdb/milvus:v2.5.11
+    container_name: w-bot-milvus
+    profiles:
+      - milvus
+    command:
+      - milvus
+      - run
+      - standalone
+    restart: unless-stopped
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    environment:
+      ETCD_USE_EMBED: "true"
+      COMMON_STORAGETYPE: local
+    volumes:
+      - milvus-data:/var/lib/milvus
 
 volumes:
-  pgdata:
+  milvus-data:
+  wbot-pip-cache:
