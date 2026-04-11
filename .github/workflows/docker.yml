@@ -34,7 +34,7 @@ jobs:
         with:
           images: registry.cn-hangzhou.aliyuncs.com/shenweibeijing/dev
           tags: |
-            type=ref,event=branch
+            type=raw,pattern=latest
             type=semver,pattern={{version}}
             type=sha
 
