@@ -13,6 +13,7 @@ from .mcp import build_mcp_tools
 from .memory_tool import SaveMemoryTool
 from .message import MessageTool
 from .registry import ToolRegistry
+from .session_search import SessionSearchTool
 from .shell import ExecTool
 from .skill import RunSkillTool
 from .spawn import ListSubagentsTool, SpawnTool, WaitSubagentTool
@@ -30,6 +31,7 @@ def build_tools(
     mcp_servers: list[dict[str, Any]] | None,
     escalation_manager: EscalationManager | None = None,
     skills_loader: Any | None = None,
+    session_search_db: Any | None = None,
     extra_readonly_dirs: list[str] | None = None,
     restrict_to_workspace: bool = False,
 ) -> list[Tool]:
@@ -79,6 +81,8 @@ def build_tools(
     registry.register(WebFetchTool())
     registry.register(MessageTool(workspace_root))
     registry.register(SaveMemoryTool(memory_store=memory_store, user_id=user_id))
+    if session_search_db is not None:
+        registry.register(SessionSearchTool(session_search_db))
     if skills_loader is not None:
         registry.register(RunSkillTool(skills_loader=skills_loader))
     registry.register(SpawnTool(workspace_root))

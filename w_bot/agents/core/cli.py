@@ -35,6 +35,7 @@ from .logging_config import get_logger, setup_logging
 from .openclaw_profile import OpenClawProfileLoader
 from .provider_factory import build_langchain_llm
 from .runtime_status import RuntimeStatusSnapshot
+from .session_search_store import SessionSearchDB, resolve_session_search_db_path
 from .session_store import (
     SessionRecord,
     SessionStateStore,
@@ -962,6 +963,8 @@ def run_cli(
         else None
     )
     escalation_manager = EscalationManager(settings.escalation_state_file_path)
+    short_term_memory_path = resolve_short_term_memory_path(settings.short_term_memory_path)
+    session_search_db = SessionSearchDB(resolve_session_search_db_path(short_term_memory_path))
     tools = build_tools(
         memory_store=memory_store,
         user_id=settings.user_id,
@@ -970,11 +973,11 @@ def run_cli(
         mcp_servers=settings.mcp_servers,
         escalation_manager=escalation_manager,
         skills_loader=skills_loader,
+        session_search_db=session_search_db,
         extra_readonly_dirs=[str(skills_loader.builtin_skills_dir)] if skills_loader else None,
         restrict_to_workspace=settings.restrict_to_workspace,
     )
 
-    short_term_memory_path = resolve_short_term_memory_path(settings.short_term_memory_path)
     logger.info("Initializing workspace short-term checkpointer: %s", short_term_memory_path)
     if settings.short_term_memory_optimization.enabled:
         logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
@@ -1002,6 +1005,8 @@ def run_cli(
             token_optimization_settings=settings.token_optimization,
             max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
             max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
+            session_search_db=session_search_db,
+            session_source="cli",
         ).app
 
         logger.info("Graph ready, entering REPL loop")

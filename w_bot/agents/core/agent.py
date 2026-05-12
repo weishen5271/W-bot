@@ -69,6 +69,7 @@ from .message_utils import (  # noqa: F401 - re-exported for tests
     sanitize_messages_for_llm,
 )
 from .openclaw_profile import OpenClawProfileLoader
+from .session_search_store import SessionSearchDB
 from .streaming_utils import (
     _invoke_llm_with_optional_stream,
 )
@@ -252,11 +253,13 @@ class ScheduledGraphApp:
 
     def invoke(self, inputs: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
         result = self._graph.invoke(inputs, config=config, **kwargs)
+        self._owner.flush_session_search_index(config)
         self._owner.schedule_deferred_summary(config)
         return result
 
     async def ainvoke(self, inputs: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
         result = await self._graph.ainvoke(inputs, config=config, **kwargs)
+        self._owner.flush_session_search_index(config)
         self._owner.schedule_deferred_summary(config)
         return result
 
@@ -321,6 +324,8 @@ class WBotGraph:
         token_optimization_settings: TokenOptimizationSettings | None = None,
         max_tool_steps_per_turn: int = 8,
         max_same_tool_call_repeats: int = 3,
+        session_search_db: SessionSearchDB | None = None,
+        session_source: str = "unknown",
     ) -> None:
         """初始化对象并保存运行所需依赖。
         
@@ -393,6 +398,8 @@ class WBotGraph:
         self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
         self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
         self._max_consecutive_tool_failures = 2
+        self._session_search_db = session_search_db
+        self._session_source = session_source.strip() or "unknown"
         self._tools_by_name = {
             str(getattr(tool, "name", "")).strip(): tool
             for tool in tools
@@ -464,6 +471,32 @@ class WBotGraph:
         self._graph = graph_builder.compile(checkpointer=checkpointer)
         self.app = ScheduledGraphApp(self._graph, self)
         logger.info("LangGraph compiled successfully")
+
+    @property
+    def session_search_llm(self) -> Any:
+        return self._llm_plain
+
+    def flush_session_search_index(self, config: RunnableConfig | None) -> None:
+        if self._session_search_db is None:
+            return
+        thread_id = _resolve_thread_id(config)
+        if thread_id == "-":
+            return
+        try:
+            snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
+            values = getattr(snapshot, "values", None) or {}
+            messages = values.get("messages", [])
+            if not isinstance(messages, list) or not messages:
+                return
+            self._session_search_db.sync_langchain_messages(
+                session_id=thread_id,
+                messages=messages,
+                source=self._session_source,
+                user_id=self._user_id,
+                model=self._text_model_name,
+            )
+        except Exception:
+            logger.warning("Failed to flush session search index: thread_id=%s", thread_id, exc_info=True)
 
     def spawn_subagent(
         self,
@@ -1103,7 +1136,10 @@ class WBotGraph:
         # Use new IntentClassifier if available
         if self._intent_classifier is not None:
             result = self._intent_classifier.classify_sync(latest_user_text, history)
-            return self._intent_classifier.select_tools_for_intent(result)
+            selected = set(self._intent_classifier.select_tools_for_intent(result))
+            if self._looks_like_session_recall_request(latest_user_text) and "session_search" in self._tools_by_name:
+                selected.add("session_search")
+            return tuple(sorted(selected))
 
         # Fallback: backward compatible logic
         tool_names = set(self._tools_by_name)
@@ -1111,6 +1147,33 @@ class WBotGraph:
             if not _should_expose_run_skill(latest_user_text.lower()):
                 tool_names.discard("run_skill")
         return tuple(sorted(tool_names))
+
+    @staticmethod
+    def _looks_like_session_recall_request(text: str) -> bool:
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return False
+        markers = (
+            "上次",
+            "之前",
+            "以前",
+            "历史",
+            "继续那个",
+            "继续上",
+            "还记得",
+            "记得",
+            "聊到哪",
+            "做到哪",
+            "怎么修",
+            "怎么处理",
+            "last time",
+            "previous",
+            "previously",
+            "before",
+            "remember when",
+            "continue that",
+        )
+        return any(marker in lowered for marker in markers)
 
     def _normalizer_for_current_turn(self, history: list[AnyMessage]) -> MultimodalNormalizer | None:
         """将输入标准化为统一结构。
