@@ -130,6 +130,11 @@
       "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "extraHeaders": null
     },
+    "xiaomi": {
+      "apiKey": "",
+      "apiBase": "https://api.xiaomimimo.com/v1",
+      "extraHeaders": null
+    },
     "vllm": {
       "apiKey": "",
       "apiBase": "",

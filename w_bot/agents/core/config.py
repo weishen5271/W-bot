@@ -712,6 +712,11 @@ def _default_provider_configs() -> dict[str, dict[str, Any]]:
             "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "extraHeaders": None,
         },
+        "xiaomi": {
+            "apiKey": "",
+            "apiBase": "https://api.xiaomimimo.com/v1",
+            "extraHeaders": None,
+        },
         "vllm": {"apiKey": "", "apiBase": "", "extraHeaders": None},
         "ollama": {"apiKey": "", "apiBase": "", "extraHeaders": None},
         "ovms": {"apiKey": "", "apiBase": "", "extraHeaders": None},

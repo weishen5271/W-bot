@@ -304,6 +304,7 @@ wbot sessions --config configs/app.json
 - `groq`
 - `zhipu`
 - `dashscope`
+- `xiaomi`
 - `vllm`
 - `ollama`
 - `ovms`

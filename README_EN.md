@@ -304,6 +304,7 @@ The default template already includes placeholders for many OpenAI-compatible pr
 - `groq`
 - `zhipu`
 - `dashscope`
+- `xiaomi`
 - `vllm`
 - `ollama`
 - `ovms`
