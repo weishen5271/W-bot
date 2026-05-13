@@ -27,6 +27,26 @@ class DummyCliStreamRenderer:
         self.finished_text = text
 
 
+def test_live_render_disabled_by_default_on_macos(monkeypatch) -> None:
+    monkeypatch.delenv("WBOT_DISABLE_LIVE", raising=False)
+    monkeypatch.delenv("WBOT_FORCE_LIVE", raising=False)
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+
+    console = SimpleNamespace(is_terminal=True, is_interactive=True, color_system="truecolor")
+
+    assert cli._supports_live_render(console) is False
+
+
+def test_live_render_force_env_overrides_macos_default(monkeypatch) -> None:
+    monkeypatch.delenv("WBOT_DISABLE_LIVE", raising=False)
+    monkeypatch.setenv("WBOT_FORCE_LIVE", "1")
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+
+    console = SimpleNamespace(is_terminal=False, is_interactive=False, color_system=None)
+
+    assert cli._supports_live_render(console) is True
+
+
 def test_cli_run_agent_turn_uses_runtime(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli, "CliStreamRenderer", DummyCliStreamRenderer)
     calls: list[dict[str, object]] = []

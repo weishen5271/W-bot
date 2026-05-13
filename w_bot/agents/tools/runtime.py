@@ -15,7 +15,7 @@ from .message import MessageTool
 from .registry import ToolRegistry
 from .session_search import SessionSearchTool
 from .shell import ExecTool
-from .skill import RunSkillTool
+from .skill import RunSkillTool, SkillsListTool, SkillViewTool
 from .spawn import ListSubagentsTool, SpawnTool, WaitSubagentTool
 from .web import WebFetchTool, WebSearchTool
 
@@ -84,6 +84,8 @@ def build_tools(
     if session_search_db is not None:
         registry.register(SessionSearchTool(session_search_db))
     if skills_loader is not None:
+        registry.register(SkillsListTool(skills_loader=skills_loader))
+        registry.register(SkillViewTool(skills_loader=skills_loader))
         registry.register(RunSkillTool(skills_loader=skills_loader))
     registry.register(SpawnTool(workspace_root))
     registry.register(ListSubagentsTool())

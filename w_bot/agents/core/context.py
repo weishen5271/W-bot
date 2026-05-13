@@ -55,7 +55,9 @@ class ContextBuilder:
         if summary:
             blocks.append(
                 "# Skills\n\n"
-                "The following skills extend your capabilities. Prefer reading a matching SKILL.md with read_file and executing it in the current agent.\n"
+                "Before replying, scan the skills below. If a skill matches or is even partially relevant, load it with skill_view(name) and follow its instructions in the current agent.\n"
+                "Prefer skill_view over read_file for skill documents; it is the canonical skill-loading path and also exposes linked references, templates, scripts, and assets.\n"
+                "Err on the side of loading the skill: skills may contain project conventions, required commands, pitfalls, and verification steps that general tools do not know.\n"
                 "Use run_skill only when the user explicitly wants isolation, parallel/background execution, or when a delegated subagent is clearly beneficial.\n"
                 "Skills with available=\"false\" need dependencies installed first.\n\n"
                 f"{summary}"

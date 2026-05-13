@@ -510,6 +510,11 @@ def _supports_live_render(console_obj: Console) -> bool:
         return False
     if os.environ.get("WBOT_FORCE_LIVE", "").strip().lower() in {"1", "true", "yes", "on"}:
         return True
+    # macOS terminals vary in how well they handle Rich Live redraws while
+    # prompt_toolkit owns stdin/stdout; prefer append-only streaming there to
+    # avoid repeated full W-bot panels.
+    if sys.platform == "darwin":
+        return False
     term = (os.environ.get("TERM") or "").strip().lower()
     if term in {"", "dumb", "unknown"}:
         return False
