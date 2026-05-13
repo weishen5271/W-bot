@@ -294,10 +294,37 @@ class FeishuGateway:
                 status_lines.append(normalized)
                 logger.info("Feishu step status: session_id=%s status=%s", session_id, normalized)
 
+        def emit_tool_progress(
+            event_type: str,
+            tool_name: str | None = None,
+            preview: str | None = None,
+            function_args: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            del function_args
+            name = str(tool_name or "").strip() or "tool"
+            label = " ".join(str(preview or name).split()) or name
+            if len(label) > 96:
+                label = label[:93] + "..."
+            if event_type == "tool.preparing":
+                emit_status(f"准备工具调用：{name}")
+                return
+            if event_type == "tool.started":
+                emit_status(f"开始执行工具：{label}")
+                return
+            if event_type == "tool.completed":
+                elapsed = kwargs.get("elapsed_seconds")
+                ok = kwargs.get("ok")
+                suffix = f"（{elapsed:.1f}s）" if isinstance(elapsed, (int, float)) else ""
+                if ok is False:
+                    suffix += " [error]"
+                emit_status(f"工具执行完成：{label}{suffix}")
+
         config = {
             "configurable": {
                 "thread_id": session_id,
                 "status_callback": emit_status if self._expose_step_logs else None,
+                "tool_progress_callback": emit_tool_progress if self._expose_step_logs else None,
                 "defer_summary_update": True,
             },
             "recursion_limit": self._recursion_limit,

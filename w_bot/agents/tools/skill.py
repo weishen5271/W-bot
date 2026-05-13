@@ -12,6 +12,16 @@ def _runtime_context(kwargs: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _emit_status(runtime: dict[str, Any], text: str) -> None:
+    callback = runtime.get("status_callback")
+    if not callable(callback):
+        return
+    try:
+        callback(str(text))
+    except Exception:
+        return
+
+
 class RunSkillTool(Tool):
     def __init__(self, *, skills_loader: SkillsLoader):
         self._skills_loader = skills_loader
@@ -59,6 +69,7 @@ class RunSkillTool(Tool):
         if skill is None:
             return f"Error: Skill not found: {skill_name}"
 
+        _emit_status(runtime, f"准备执行 Skill：{skill_name}")
         result = await graph.run_skill_subagent(
             skill_name=skill_name,
             task=task,
@@ -67,4 +78,5 @@ class RunSkillTool(Tool):
             thread_id=str(runtime.get("thread_id") or "-"),
             status_callback=runtime.get("status_callback") if callable(runtime.get("status_callback")) else None,
         )
+        _emit_status(runtime, f"Skill 执行完成：{skill_name}")
         return json.dumps(result, ensure_ascii=False, indent=2)

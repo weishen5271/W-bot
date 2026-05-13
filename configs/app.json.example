@@ -133,7 +133,12 @@
     "xiaomi": {
       "apiKey": "",
       "apiBase": "https://api.xiaomimimo.com/v1",
-      "extraHeaders": null
+      "extraHeaders": null,
+      "extraBody": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     },
     "vllm": {
       "apiKey": "",

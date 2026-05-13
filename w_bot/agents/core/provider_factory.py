@@ -24,6 +24,8 @@ def build_langchain_llm(
     }
     if settings.llm_extra_headers:
         kwargs["default_headers"] = settings.llm_extra_headers
+    if getattr(settings, "llm_extra_body", None):
+        kwargs["extra_body"] = settings.llm_extra_body
     return ChatOpenAI(**kwargs)
 
 

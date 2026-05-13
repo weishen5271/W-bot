@@ -18,6 +18,7 @@ def _invoke_llm_with_optional_stream(
     messages: list[AnyMessage],
     token_callback: Callable[[Any], None] | None,
     debug_callback: Callable[[str], None] | None = None,
+    tool_event_callback: Callable[..., None] | None = None,
 ) -> AIMessage:
     if token_callback is None:
         return llm.invoke(messages)
@@ -27,6 +28,7 @@ def _invoke_llm_with_optional_stream(
         messages=messages,
         token_callback=token_callback,
         debug_callback=debug_callback,
+        tool_event_callback=tool_event_callback,
     )
     if direct_stream_result is not None:
         return direct_stream_result
@@ -41,9 +43,15 @@ def _invoke_llm_with_optional_stream(
     reasoning_started = False
     answer_started = False
     emitted_any = False
+    announced_tool_indexes: set[int] = set()
     for chunk in llm.stream(messages):
         chunk_count += 1
         merged = chunk if merged is None else (merged + chunk)
+        _announce_stream_tool_preparing(
+            chunk,
+            announced_tool_indexes=announced_tool_indexes,
+            tool_event_callback=tool_event_callback,
+        )
         reasoning_text = _extract_stream_chunk_reasoning(chunk)
         if not reasoning_text:
             merged_reasoning = _to_stream_reasoning_content(getattr(merged, "content", ""))
@@ -111,7 +119,61 @@ def _invoke_llm_with_optional_stream(
         chunk_text_count,
         emitted_any,
     )
+    if merged_emitted_reasoning:
+        _attach_reasoning_content(merged, merged_emitted_reasoning)
     return merged
+
+
+def _attach_reasoning_content(message: AIMessage, reasoning_content: str) -> None:
+    reasoning = str(reasoning_content or "")
+    if not reasoning:
+        return
+    try:
+        additional = getattr(message, "additional_kwargs", None)
+        if not isinstance(additional, dict):
+            message.additional_kwargs = {"reasoning_content": reasoning}
+        elif not isinstance(additional.get("reasoning_content"), str):
+            additional["reasoning_content"] = reasoning
+    except Exception:
+        logger.debug("Failed to attach reasoning_content to AIMessage", exc_info=True)
+
+
+def _announce_stream_tool_preparing(
+    chunk: Any,
+    *,
+    announced_tool_indexes: set[int],
+    tool_event_callback: Callable[..., None] | None,
+) -> None:
+    if tool_event_callback is None:
+        return
+    tool_chunks = getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None) or []
+    for fallback_index, item in enumerate(tool_chunks):
+        if isinstance(item, dict):
+            index = _coerce_stream_tool_index(item.get("index"), fallback_index)
+            name = str(item.get("name") or "").strip()
+            function = item.get("function")
+            if not name and isinstance(function, dict):
+                name = str(function.get("name") or "").strip()
+        else:
+            index = _coerce_stream_tool_index(getattr(item, "index", fallback_index), fallback_index)
+            name = str(getattr(item, "name", "") or "").strip()
+            function = getattr(item, "function", None)
+            if not name and function is not None:
+                name = str(getattr(function, "name", "") or "").strip()
+        if not name or index in announced_tool_indexes:
+            continue
+        announced_tool_indexes.add(index)
+        try:
+            tool_event_callback("tool.preparing", name, name, {})
+        except Exception:
+            logger.debug("Tool event callback failed", exc_info=True)
+
+
+def _coerce_stream_tool_index(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return fallback
 
 
 def _invoke_openai_compatible_direct_stream(
@@ -120,6 +182,7 @@ def _invoke_openai_compatible_direct_stream(
     messages: list[AnyMessage],
     token_callback: Callable[[Any], None],
     debug_callback: Callable[[str], None] | None = None,
+    tool_event_callback: Callable[..., None] | None = None,
 ) -> AIMessage | None:
     chat_model = getattr(llm, "bound", llm)
     binding_kwargs = getattr(llm, "kwargs", {}) if hasattr(llm, "bound") else {}
@@ -163,6 +226,7 @@ def _invoke_openai_compatible_direct_stream(
         debug_callback("completion_start_direct")
 
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_buffers: dict[int, dict[str, str]] = defaultdict(lambda: {"id": "", "name": "", "arguments": ""})
     emitted_any = False
     chunk_count = 0
@@ -171,6 +235,7 @@ def _invoke_openai_compatible_direct_stream(
     first_text_at: float | None = None
     reasoning_started = False
     answer_started = False
+    announced_tool_indexes: set[int] = set()
     try:
         for chunk in stream:
             chunk_count += 1
@@ -198,6 +263,7 @@ def _invoke_openai_compatible_direct_stream(
                 if not reasoning_started:
                     reasoning_started = True
                 token_callback({"kind": "reasoning", "text": reasoning})
+                reasoning_parts.append(reasoning)
                 if debug_callback is not None and not emitted_any:
                     debug_callback("first_token_emitted_direct")
                 emitted_any = True
@@ -234,6 +300,12 @@ def _invoke_openai_compatible_direct_stream(
                 fn_name = getattr(function, "name", None)
                 if isinstance(fn_name, str) and fn_name:
                     entry["name"] = fn_name
+                    if tool_event_callback is not None and index not in announced_tool_indexes:
+                        announced_tool_indexes.add(index)
+                        try:
+                            tool_event_callback("tool.preparing", fn_name, fn_name, {})
+                        except Exception:
+                            logger.debug("Tool event callback failed", exc_info=True)
                 fn_args = getattr(function, "arguments", None)
                 if isinstance(fn_args, str) and fn_args:
                     entry["arguments"] += fn_args
@@ -274,19 +346,17 @@ def _invoke_openai_compatible_direct_stream(
         f"{(first_chunk_at - request_started_at) * 1000:.1f}" if first_chunk_at is not None else "-",
         f"{(first_text_at - request_started_at) * 1000:.1f}" if first_text_at is not None else "-",
     )
-    return AIMessage(content="".join(content_parts), tool_calls=tool_calls)
+    additional_kwargs: dict[str, Any] = {}
+    reasoning_content = "".join(reasoning_parts)
+    if reasoning_content:
+        additional_kwargs["reasoning_content"] = reasoning_content
+    return AIMessage(content="".join(content_parts), tool_calls=tool_calls, additional_kwargs=additional_kwargs)
 
 
 def _extract_stream_chunk_text(chunk: Any) -> str:
-    # Preferred path: LangChain message chunks usually implement text().
-    try:
-        text_method = getattr(chunk, "text", None)
-        if callable(text_method):
-            value = text_method()
-            if isinstance(value, str) and value:
-                return value
-    except Exception:
-        logger.debug("chunk.text() extraction failed", exc_info=True)
+    text_attr = getattr(chunk, "text", None)
+    if isinstance(text_attr, str) and text_attr:
+        return text_attr
 
     content = getattr(chunk, "content", "")
     text = _to_stream_text_content(content)

@@ -41,10 +41,10 @@ from .session_store import (
     SessionStateStore,
 )
 from .streaming import (
+    StreamTextAssembler,
     _latest_ai_reply_from_result,
     _message_to_text,
     normalize_display_text,
-    normalize_reasoning_text,
 )
 from .text_sanitizer import sanitize_user_text
 from .token_tracker import extract_token_usage
@@ -228,10 +228,12 @@ class CliStreamRenderer:
         self._heartbeat_thread.start()
         self.stream_started = False
         self._recent_tool_lines: list[str] = []
+        self._recent_trace_lines: list[str] = []
+        self._trace_stream_lines: list[str] = []
         self._stream_box_opened = False
         self._stream_buf = ""
         self._raw_answer_buffer = ""
-        self._raw_reasoning_rendered = ""
+        self._reasoning_assembler = StreamTextAssembler()
         self._reasoning_stream_buf = ""
         self._reasoning_started = False
 
@@ -239,14 +241,50 @@ class CliStreamRenderer:
         text = str(line or "").rstrip()
         if not text:
             return
+        if text in self._recent_tool_lines:
+            return
         self._recent_tool_lines.append(text)
         self._recent_tool_lines = self._recent_tool_lines[-8:]
+        self._append_trace_render_line(text)
         if self._runtime_status is not None and raw_status is not None:
             self._runtime_status.record_status_message(raw_status)
-        self._flush_stream()
         if spinner_text:
             self._spinner.update_raw(spinner_text)
-        self._spinner.print_above(text)
+        self._show_trace_update(text)
+
+    def _push_trace_line(self, text: str, *, raw_status: str | None = None, spinner_text: str | None = None) -> None:
+        normalized = " ".join(str(text or "").strip().split())
+        if not normalized:
+            return
+        if normalized in self._recent_trace_lines:
+            return
+        self._recent_trace_lines.append(normalized)
+        self._recent_trace_lines = self._recent_trace_lines[-24:]
+        self._append_trace_render_line(f"  | {normalized}")
+        if self._runtime_status is not None and raw_status is not None:
+            self._runtime_status.record_status_message(raw_status)
+        if spinner_text:
+            self._spinner.update_raw(spinner_text)
+        self._show_trace_update(f"  | {normalized}")
+
+    def _append_trace_render_line(self, line: str) -> None:
+        text = str(line or "").strip()
+        if not text:
+            return
+        if text in self._trace_stream_lines:
+            return
+        self._trace_stream_lines.append(text)
+        self._trace_stream_lines = self._trace_stream_lines[-12:]
+
+    def _show_trace_update(self, line: str) -> None:
+        if self._live_enabled:
+            if not self._stream_box_opened:
+                self._open_stream_box()
+            self._refresh_live_render()
+            return
+        if self._stream_box_opened:
+            self._flush_stream()
+        self._spinner.print_above(line)
 
     def _open_stream_box(self) -> None:
         if self._stream_box_opened:
@@ -291,22 +329,25 @@ class CliStreamRenderer:
             self._reasoning_started = False
 
     def _build_stream_renderable(self) -> Panel:
+        trace_text = "\n".join(self._trace_stream_lines).strip()
         reasoning_text = self._reasoning_stream_buf.strip()
         answer_text = self._stream_buf.strip()
+        trace_renderable: Any
         reasoning_renderable: Any
         answer_renderable: Any
+        renderables: list[Any] = []
+        if trace_text:
+            trace_renderable = Text(trace_text, style="dim")
+            renderables.append(Panel(trace_renderable, title="执行轨迹", border_style="blue", padding=(0, 1)))
         if reasoning_text:
             reasoning_renderable = Text(reasoning_text, style="italic cyan")
-        else:
-            reasoning_renderable = Text("等待思考输出...", style="dim")
+            renderables.append(Panel(reasoning_renderable, title="思考", border_style="cyan", padding=(0, 1)))
         if answer_text:
             answer_renderable = Text(answer_text)
         else:
             answer_renderable = Text("等待回答输出...", style="dim")
-        body = Group(
-            Panel(reasoning_renderable, title="思考", border_style="cyan", padding=(0, 1)),
-            Panel(answer_renderable, title="回答", border_style="green", padding=(0, 1)),
-        )
+        renderables.append(Panel(answer_renderable, title="回答", border_style="green", padding=(0, 1)))
+        body = Group(*renderables)
         return Panel(body, title="W-bot", border_style="cyan", padding=(0, 1))
 
     def _refresh_live_render(self) -> None:
@@ -316,7 +357,7 @@ class CliStreamRenderer:
 
     def update_status(self, text: str) -> None:
         raw = str(text or "")
-        if raw.startswith("  ┊ "):
+        if raw.startswith("  | "):
             self._push_tool_line(
                 raw,
                 raw_status=raw.strip(),
@@ -329,6 +370,12 @@ class CliStreamRenderer:
         phase = self._runtime_status.spinner_text() if self._runtime_status is not None else _friendly_cli_phase(text)
         self._status_line = phase.strip()
         self._spinner.update(text)
+        trace_text = _friendly_cli_phase(raw)
+        self._push_trace_line(
+            trace_text or raw,
+            raw_status=raw.strip(),
+            spinner_text=phase,
+        )
 
     def on_tool_progress(
         self,
@@ -343,12 +390,12 @@ class CliStreamRenderer:
         label = str(preview or name).strip() or name
         if len(label) > 88:
             label = label[:85] + "..."
-        if event_type == "tool.started":
-            prepare_line = f"  ┊ ⚡ preparing {name}..."
+        if event_type in {"tool.preparing", "tool.started"}:
+            prepare_line = f"  | preparing {name}..."
             self._push_tool_line(
                 prepare_line,
                 raw_status=prepare_line.strip(),
-                spinner_text=f"{_tool_progress_emoji(name)} {label}",
+                spinner_text=f"{_tool_progress_action(name)} {label}",
             )
             return
         if event_type != "tool.completed":
@@ -364,7 +411,7 @@ class CliStreamRenderer:
         self._push_tool_line(
             done_line,
             raw_status=done_line.strip(),
-            spinner_text=f"{_tool_progress_emoji(name)} {label}",
+            spinner_text=f"{_tool_progress_action(name)} {label}",
         )
 
     def _emit_stream_text(self, text: str) -> None:
@@ -380,6 +427,9 @@ class CliStreamRenderer:
             self._stream_buf += visible
             self._refresh_live_render()
             return
+        if self._reasoning_started:
+            self._console.print()
+            self._reasoning_started = False
         self._stream_buf += visible
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
@@ -402,10 +452,7 @@ class CliStreamRenderer:
         if not self._reasoning_started:
             self._console.print(Text("思考：", style="bold cyan"))
             self._reasoning_started = True
-        self._reasoning_stream_buf += visible
-        while "\n" in self._reasoning_stream_buf:
-            line, self._reasoning_stream_buf = self._reasoning_stream_buf.split("\n", 1)
-            self._console.print(Text(line, style="italic cyan"))
+        self._console.print(Text(visible, style="italic cyan"), end="")
 
     def on_delta(self, delta: Any) -> None:
         payload = delta
@@ -413,22 +460,22 @@ class CliStreamRenderer:
         if isinstance(delta, dict):
             kind = str(delta.get("kind") or "answer").strip().lower() or "answer"
             payload = delta.get("text") or ""
+        if kind == "reasoning":
+            payload = payload or ""
+            if not payload:
+                return
+            self._last_token_at = time.monotonic()
+            reasoning_delta = self._reasoning_assembler.consume(str(payload))
+            self._emit_reasoning_text(reasoning_delta)
+            return
         if kind != "answer":
-            # CLI 默认只展示最终回答，避免将中间推理文本混入正文。
+            self._push_trace_line(str(payload or kind), spinner_text=str(payload or kind))
             return
         payload = payload or ""
         if not payload:
             return
         self._last_token_at = time.monotonic()
         self._raw_answer_buffer += str(payload)
-        current_reasoning = normalize_reasoning_text(self._raw_answer_buffer)
-        previous_reasoning = self._raw_reasoning_rendered
-        if current_reasoning.startswith(previous_reasoning):
-            reasoning_delta = current_reasoning[len(previous_reasoning):]
-        else:
-            reasoning_delta = current_reasoning
-        self._raw_reasoning_rendered = current_reasoning
-        self._emit_reasoning_text(reasoning_delta)
         previous = self._buffer
         current = normalize_display_text(self._raw_answer_buffer)
         self._buffer = current
@@ -448,11 +495,7 @@ class CliStreamRenderer:
         final_payload = final_text or self._raw_answer_buffer or self._buffer
         if final_payload and not self.stream_started:
             self._raw_answer_buffer = str(final_payload)
-            self._raw_reasoning_rendered = normalize_reasoning_text(self._raw_answer_buffer)
             self._buffer = normalize_display_text(self._raw_answer_buffer)
-            if self._raw_reasoning_rendered:
-                self._emit_reasoning_text(self._raw_reasoning_rendered)
-                self._raw_reasoning_rendered = ""
             self._emit_stream_text(self._buffer)
         self._flush_stream()
         self._spinner.stop()
@@ -603,23 +646,6 @@ def _render_runtime_progress_panel(status: RuntimeStatusSnapshot | None) -> Pane
     )
 
 
-def _tool_progress_emoji(tool_name: str) -> str:
-    normalized = (tool_name or "").strip().lower()
-    if any(token in normalized for token in ["browser", "navigate", "web"]):
-        return "🌐"
-    if any(token in normalized for token in ["search", "grep", "find"]):
-        return "🔎"
-    if any(token in normalized for token in ["read", "fetch", "load"]):
-        return "📖"
-    if any(token in normalized for token in ["write", "edit", "patch"]):
-        return "✍"
-    if any(token in normalized for token in ["exec", "shell", "command"]):
-        return "⚙"
-    if any(token in normalized for token in ["spawn", "subagent", "wait"]):
-        return "🧩"
-    return "⚡"
-
-
 def _tool_progress_action(tool_name: str) -> str:
     normalized = (tool_name or "").strip().lower()
     for token, label in [
@@ -652,14 +678,13 @@ def _format_tool_progress_line(
     if len(preview_text) > 88:
         preview_text = preview_text[:85] + "..."
     if event == "preparing":
-        return f"  ┊ ⚡ preparing {tool_name}..."
-    emoji = _tool_progress_emoji(tool_name)
+        return f"  | preparing {tool_name}..."
     action = _tool_progress_action(tool_name)
     duration = f"  {elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
     suffix = ""
     if ok is False:
         suffix = " [error]"
-    return f"  ┊ {emoji} {action}  {preview_text or tool_name}{duration}{suffix}"
+    return f"  | {action}  {preview_text or tool_name}{duration}{suffix}"
 
 
 def _format_tool_done_line(
@@ -687,7 +712,7 @@ def _tool_progress_phase_text(tool_name: str, event: str, preview: str) -> str:
 
 def _is_tool_progress_label(text: str) -> bool:
     normalized = (text or "").strip()
-    return normalized.startswith("┊") or normalized.startswith("  ┊")
+    return normalized.startswith("|") or normalized.startswith("  |")
 
 
 def _status_bar_phase_style(phase_label: str, *, pending_escalations: int) -> str:
@@ -741,7 +766,7 @@ def _trim_plain_text(text: str, max_width: int) -> str:
 
 def _phase_label_for_bar(phase_label: str, *, max_width: int) -> str:
     if _is_tool_progress_label(phase_label):
-        compact = phase_label.strip().removeprefix("┊").strip()
+        compact = phase_label.strip().removeprefix("|").strip()
         return _trim_plain_text(compact, max_width)
     return _trim_plain_text(phase_label, max_width)
 
@@ -1164,11 +1189,19 @@ def _run_agent_turn(
             **kwargs,
         )
 
+    def emit_debug(text: str) -> None:
+        raw = str(text or "").strip()
+        if not raw:
+            return
+        if raw.startswith("fallback_emit_final_text"):
+            renderer.update_status("模型未返回增量片段，改为输出最终文本。")
+
     config = {
         "configurable": {
             "thread_id": app_state.session_id,
             "status_callback": emit_status,
             "token_callback": emit_token,
+            "debug_callback": emit_debug,
             "tool_progress_callback": emit_tool_progress,
             "defer_summary_update": True,
         },
@@ -1176,7 +1209,8 @@ def _run_agent_turn(
     }
     inputs = {"messages": [HumanMessage(content=user_text)]}
 
-    set_runtime_callbacks(token_callback=emit_token, debug_callback=None)
+    renderer.update_status("请求已接收，开始处理。")
+    set_runtime_callbacks(token_callback=emit_token, debug_callback=emit_debug)
     try:
         result = graph.invoke(inputs, config=config)
         latest_ai_text = _latest_ai_reply_from_result(result)

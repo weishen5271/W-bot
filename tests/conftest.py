@@ -71,6 +71,7 @@ def sample_config(temp_config_dir: Path) -> dict[str, Any]:
         "llm_api_key": "test-key",
         "llm_base_url": "https://api.openai.com/v1",
         "llm_extra_headers": {},
+        "llm_extra_body": {},
         "llm_temperature": 0.0,
         "dashscope_api_key": "",
         "bailian_base_url": "",

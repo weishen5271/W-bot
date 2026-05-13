@@ -116,23 +116,6 @@ def _tool_args_preview(tool_name: str, args: dict[str, Any]) -> str:
     return compact[:96] + ("..." if len(compact) > 96 else "")
 
 
-def _tool_progress_emoji(tool_name: str) -> str:
-    normalized = (tool_name or "").strip().lower()
-    if any(token in normalized for token in ["browser", "navigate", "web"]):
-        return "🌐"
-    if any(token in normalized for token in ["search", "grep", "find"]):
-        return "🔎"
-    if any(token in normalized for token in ["read", "fetch", "load"]):
-        return "📖"
-    if any(token in normalized for token in ["write", "edit", "patch"]):
-        return "✍"
-    if any(token in normalized for token in ["exec", "shell", "command"]):
-        return "⚙"
-    if any(token in normalized for token in ["spawn", "subagent", "wait"]):
-        return "🧩"
-    return "⚡"
-
-
 def _tool_progress_action(tool_name: str) -> str:
     normalized = (tool_name or "").strip().lower()
     for token, label in [
@@ -162,13 +145,13 @@ def _tool_progress_line(
     ok: bool | None,
 ) -> str:
     if event_type == "tool.started":
-        return f"  ┊ ⚡ preparing {tool_name}..."
+        return f"  | preparing {tool_name}..."
     label = " ".join((preview or tool_name).split())
     if len(label) > 88:
         label = label[:85] + "..."
     duration = f"  {elapsed_seconds:.1f}s" if elapsed_seconds is not None else ""
     suffix = " [error]" if ok is False else ""
-    return f"  ┊ {_tool_progress_emoji(tool_name)} {_tool_progress_action(tool_name)}  {label}{duration}{suffix}"
+    return f"  | {_tool_progress_action(tool_name)}  {label}{duration}{suffix}"
 
 
 def _emit_tool_progress(
@@ -552,7 +535,7 @@ class WBotGraph:
     def _retrieve_memories(
         self,
         state: AgentState,
-        config: RunnableConfig | None = None,
+        config: RunnableConfig,
     ) -> dict[str, str]:
         """检索并返回匹配结果。
         
@@ -592,7 +575,7 @@ class WBotGraph:
     def _agent(
         self,
         state: AgentState,
-        config: RunnableConfig | None = None,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         """处理agent相关逻辑并返回结果。
         
@@ -663,6 +646,7 @@ class WBotGraph:
                 messages=messages,
                 token_callback=token_callback,
                 debug_callback=debug_callback,
+                tool_event_callback=_resolve_tool_progress_callback(config),
             )
         except Exception as exc:
             if _is_messages_length_error(exc):
@@ -681,6 +665,7 @@ class WBotGraph:
                         messages=fallback_messages,
                         token_callback=token_callback,
                         debug_callback=debug_callback,
+                        tool_event_callback=_resolve_tool_progress_callback(config),
                     )
                 except Exception as fallback_exc:
                     logger.exception("Text-only compatibility fallback failed")
@@ -699,6 +684,7 @@ class WBotGraph:
                         messages=messages,
                         token_callback=token_callback,
                         debug_callback=debug_callback,
+                        tool_event_callback=_resolve_tool_progress_callback(config),
                     )
                 except Exception as fallback_exc:
                     logger.exception("Route fallback to text model failed")
@@ -732,6 +718,7 @@ class WBotGraph:
                     messages=continuation_messages,
                     token_callback=token_callback,
                     debug_callback=debug_callback,
+                    tool_event_callback=_resolve_tool_progress_callback(config),
                 )
             except Exception as continuation_exc:
                 logger.exception("Continuation invoke failed")
@@ -799,7 +786,7 @@ class WBotGraph:
     def _prepare_prompt_context(
         self,
         state: AgentState,
-        config: RunnableConfig | None = None,
+        config: RunnableConfig,
     ) -> dict[str, str]:
         """预先构建当前回合内可复用的系统提示词固定部分。"""
         _emit_status(config, "正在准备回合级提示词上下文...")
@@ -817,7 +804,7 @@ class WBotGraph:
     def _action(
         self,
         state: AgentState,
-        config: RunnableConfig | None = None,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         try:
             loop = asyncio.get_running_loop()
@@ -949,7 +936,7 @@ class WBotGraph:
     def _recover_after_tool_failure(
         self,
         state: AgentState,
-        config: RunnableConfig | None = None,
+        config: RunnableConfig,
     ) -> dict[str, Any]:
         consecutive_failures = int(state.get("consecutive_tool_failures", 0) or 0)
         tool_name = str(state.get("last_tool_name") or "工具").strip()

@@ -32,6 +32,7 @@ class Settings:
     llm_api_key: str
     llm_base_url: str
     llm_extra_headers: dict[str, str]
+    llm_extra_body: dict[str, Any]
     llm_temperature: float
     dashscope_api_key: str
     bailian_base_url: str
@@ -199,6 +200,7 @@ def load_settings(
             default="",
         ),
         llm_extra_headers=_header_dict_value(active_provider, "extraHeaders", "extra_headers", default={}),
+        llm_extra_body=_dict_value(active_provider, "extraBody", "extra_body", default={}),
         llm_temperature=temperature,
         dashscope_api_key=_must_value(active_provider, "apiKey", "api_key"),
         bailian_base_url=_string_value(
@@ -699,38 +701,40 @@ def default_app_config() -> dict[str, Any]:
 
 def _default_provider_configs() -> dict[str, dict[str, Any]]:
     return {
-        "custom": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "azureOpenai": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "anthropic": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "openai": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "openrouter": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "deepseek": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "groq": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "zhipu": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "custom": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "azureOpenai": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "anthropic": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "openai": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "openrouter": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "deepseek": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "groq": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "zhipu": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
         "dashscope": {
             "apiKey": "",
             "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "extraHeaders": None,
+            "extraBody": None,
         },
         "xiaomi": {
             "apiKey": "",
             "apiBase": "https://api.xiaomimimo.com/v1",
             "extraHeaders": None,
+            "extraBody": None,
         },
-        "vllm": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "ollama": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "ovms": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "gemini": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "moonshot": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "minimax": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "mistral": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "stepfun": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "aihubmix": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "siliconflow": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "volcengine": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "volcengineCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "byteplus": {"apiKey": "", "apiBase": "", "extraHeaders": None},
-        "byteplusCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None},
+        "vllm": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "ollama": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "ovms": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "gemini": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "moonshot": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "minimax": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "mistral": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "stepfun": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "aihubmix": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "siliconflow": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "volcengine": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "volcengineCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "byteplus": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
+        "byteplusCodingPlan": {"apiKey": "", "apiBase": "", "extraHeaders": None, "extraBody": None},
     }
 
 
@@ -769,13 +773,6 @@ def _resolve_path(path: str) -> Path:
     if not target.is_absolute():
         target = Path.cwd() / target
     return target
-
-
-def _dict_value(data: dict[str, Any], *keys: str) -> dict[str, Any]:
-    value = _pick(data, *keys)
-    if isinstance(value, dict):
-        return value
-    return {}
 
 
 def _must_value(data: dict[str, Any], *keys: str) -> str:
@@ -875,3 +872,10 @@ def _header_dict_value(data: dict[str, Any], *keys: str, default: dict[str, str]
         if k and v:
             out[k] = v
     return out
+
+
+def _dict_value(data: dict[str, Any], *keys: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    value = _pick(data, *keys)
+    if not isinstance(value, dict):
+        return dict(default or {})
+    return dict(value)

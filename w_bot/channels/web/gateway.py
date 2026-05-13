@@ -647,6 +647,48 @@ def _build_app(
                     logger.info("Web step status: session_id=%s status=%s", session_id, normalized)
                     enqueue_event("status", normalized)
 
+                def emit_tool_progress(
+                    event_type: str,
+                    tool_name: str | None = None,
+                    preview: str | None = None,
+                    function_args: dict[str, Any] | None = None,
+                    **kwargs: Any,
+                ) -> None:
+                    del function_args
+                    if not expose_step_logs:
+                        return
+                    name = str(tool_name or "").strip() or "tool"
+                    label = " ".join(str(preview or name).split()) or name
+                    if len(label) > 96:
+                        label = label[:93] + "..."
+                    if event_type == "tool.preparing":
+                        text = f"准备工具调用：{name}"
+                    elif event_type == "tool.started":
+                        text = f"开始执行工具：{label}"
+                    elif event_type == "tool.completed":
+                        elapsed = kwargs.get("elapsed_seconds")
+                        ok = kwargs.get("ok")
+                        suffix = ""
+                        if isinstance(elapsed, (int, float)):
+                            suffix += f"（{elapsed:.1f}s）"
+                        if ok is False:
+                            suffix += " [error]"
+                            event_type = "tool.failed"
+                        text = f"工具执行完成：{label}{suffix}"
+                    else:
+                        text = f"{name}: {label}"
+                    enqueue_event(
+                        "tool",
+                        json.dumps(
+                            {
+                                "event_type": event_type,
+                                "tool_name": name,
+                                "text": text,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+
                 if expose_step_logs:
                     emit_status("请求已接收，开始处理。")
                 config = {
@@ -654,6 +696,7 @@ def _build_app(
                         "thread_id": session_id,
                         "token_callback": emit_token,
                         "status_callback": emit_status if expose_step_logs else None,
+                        "tool_progress_callback": emit_tool_progress if expose_step_logs else None,
                         "defer_summary_update": True,
                     },
                     "recursion_limit": recursion_limit,
@@ -724,6 +767,10 @@ def _build_app(
                 if event == "status":
                     payload_json = json.dumps({"text": data}, ensure_ascii=False)
                     yield _sse_event("status", payload_json)
+                    await asyncio.sleep(0)
+                    continue
+                if event == "tool":
+                    yield _sse_event("tool", data)
                     await asyncio.sleep(0)
                     continue
                 if event == "ai_message":

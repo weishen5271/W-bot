@@ -179,6 +179,45 @@
       min-height: 58px;
     }
 
+    .assistant-trace {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .assistant-trace-line {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .assistant-trace-mark {
+      width: 6px;
+      height: 6px;
+      flex: 0 0 6px;
+      margin-top: 6px;
+      border-radius: 999px;
+      background: #38bdf8;
+    }
+
+    .assistant-trace-line.is-done .assistant-trace-mark {
+      background: #22c55e;
+    }
+
+    .assistant-trace-line.is-error .assistant-trace-mark {
+      background: #ef4444;
+    }
+
+    .assistant-trace-text {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
     .assistant-text {
       line-height: 1.6;
       white-space: pre-wrap;
@@ -450,6 +489,9 @@
     const body = document.createElement("div");
     body.className = "assistant-body";
 
+    const trace = document.createElement("div");
+    trace.className = "assistant-trace";
+
     const reasoning = document.createElement("div");
     reasoning.className = "assistant-text reasoning is-streaming";
 
@@ -460,6 +502,7 @@
     badge.appendChild(label);
     meta.appendChild(badge);
     meta.appendChild(phase);
+    body.appendChild(trace);
     body.appendChild(reasoning);
     body.appendChild(text);
     card.appendChild(meta);
@@ -467,7 +510,7 @@
     messagesEl.appendChild(card);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 
-    return {card, phase, reasoning, text, dot};
+    return {card, phase, trace, reasoning, text, dot};
   }
 
   async function createSessionAndLoadHistory() {
@@ -572,6 +615,31 @@
       if (shouldStick) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
+    }
+
+    function appendTraceLine(text, kind = "status") {
+      const normalized = normalizeDisplayText(text).trim();
+      if (!normalized) return;
+      const last = assistantCard.trace.lastElementChild;
+      if (last && last.dataset.text === normalized) return;
+      const stick = shouldStickToBottom();
+      const row = document.createElement("div");
+      row.className = "assistant-trace-line";
+      if (kind === "tool.completed") row.classList.add("is-done");
+      if (kind === "tool.failed") row.classList.add("is-error");
+      row.dataset.text = normalized;
+      const mark = document.createElement("span");
+      mark.className = "assistant-trace-mark";
+      const content = document.createElement("span");
+      content.className = "assistant-trace-text";
+      content.textContent = normalized;
+      row.appendChild(mark);
+      row.appendChild(content);
+      assistantCard.trace.appendChild(row);
+      while (assistantCard.trace.children.length > 12) {
+        assistantCard.trace.removeChild(assistantCard.trace.firstElementChild);
+      }
+      scrollToBottomIfNeeded(stick);
     }
 
     function flushRender(force = false) {
@@ -751,6 +819,12 @@
           } else if (event === "status" && parsed.text) {
             pendingStatusText = parsed.text;
             assistantCard.phase.textContent = pendingStatusText;
+            appendTraceLine(parsed.text, "status");
+          } else if (event === "tool" && parsed.text) {
+            const eventType = String(parsed.event_type || "tool");
+            pendingStatusText = parsed.text;
+            assistantCard.phase.textContent = pendingStatusText;
+            appendTraceLine(parsed.text, eventType);
           } else if (event === "done") {
             finalReply = String(parsed.reply || finalReply || "");
             stopThinking();
