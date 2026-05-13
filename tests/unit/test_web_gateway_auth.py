@@ -24,24 +24,23 @@ def _build_test_client(tmp_path: Path) -> tuple[TestClient, EscalationManager]:
         ),
     )
 
-    class DummyGraph:
+    class DummyRuntime:
         def __init__(self) -> None:
             self.history: dict[str, list[object]] = {}
 
-        def get_state(self, config: dict[str, object]) -> SimpleNamespace:
-            session_id = str(config["configurable"]["thread_id"])
-            return SimpleNamespace(values={"messages": list(self.history.get(session_id, []))})
+        def get_session_messages(self, session_id: str) -> list[object]:
+            return list(self.history.get(session_id, []))
 
-        def invoke(self, inputs: dict[str, object], config: dict[str, object]) -> dict[str, object]:
-            session_id = str(config["configurable"]["thread_id"])
+        def run_turn(self, *, session_id: str, inbound_messages: list[object], config: object) -> SimpleNamespace:
+            del config
             history = list(self.history.get(session_id, []))
-            history.extend(inputs["messages"])
+            history.extend(inbound_messages)
             history.append(AIMessage(content="secured-reply"))
             self.history[session_id] = history
-            return {"messages": history}
+            return SimpleNamespace(final_response="secured-reply", messages=history)
 
     app = _build_app(
-        graph=DummyGraph(),
+        runtime=DummyRuntime(),
         thread_prefix="web",
         expose_step_logs=False,
         recursion_limit=5,
@@ -151,3 +150,57 @@ def test_history_endpoint_returns_existing_messages(tmp_path: Path) -> None:
     messages = history_response.json()["messages"]
     assert [item["role"] for item in messages] == ["human", "thought"]
     assert messages[0]["content"] == "hello"
+
+
+def test_web_chat_uses_agent_runtime_directly(tmp_path: Path) -> None:
+    escalation_manager = EscalationManager(str(tmp_path / "escalations.json"))
+    auth_config = WebAuthConfig(
+        enabled=True,
+        proxy_user_header="X-Forwarded-User",
+        proxy_roles_header="X-Forwarded-Roles",
+        approver_roles=("admin", "approver"),
+        session_binding_file_path=str(tmp_path / "web_sessions.json"),
+        bearer_tokens=(TokenPrincipal(token="user-token", user_id="alice", roles=("user",)),),
+    )
+
+    class DummyRuntime:
+        def __init__(self) -> None:
+            self.history: dict[str, list[object]] = {}
+
+        def get_session_messages(self, session_id: str) -> list[object]:
+            return list(self.history.get(session_id, []))
+
+        def run_turn(self, *, session_id: str, inbound_messages: list[object], config: object) -> SimpleNamespace:
+            del config
+            history = list(self.history.get(session_id, []))
+            history.extend(inbound_messages)
+            history.append(AIMessage(content="runtime-reply"))
+            self.history[session_id] = history
+            return SimpleNamespace(final_response="runtime-reply", messages=history)
+
+    app = _build_app(
+        runtime=DummyRuntime(),
+        thread_prefix="web",
+        expose_step_logs=False,
+        recursion_limit=5,
+        escalation_manager=escalation_manager,
+        auth_config=auth_config,
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer user-token"}
+    session_id = client.post("/api/session/new", headers=headers).json()["session_id"]
+
+    chat_response = client.post(
+        "/api/chat",
+        headers=headers,
+        json={"message": "hello", "session_id": session_id},
+    )
+    history_response = client.get("/api/history", headers=headers, params={"session_id": session_id})
+
+    assert chat_response.status_code == 200
+    assert chat_response.json()["reply"] == "runtime-reply"
+    assert history_response.status_code == 200
+    messages = history_response.json()["messages"]
+    assert [item["role"] for item in messages] == ["human", "thought"]
+    assert messages[0]["content"] == "hello"
+    assert messages[1]["content"] == "runtime-reply"

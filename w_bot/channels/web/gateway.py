@@ -15,14 +15,18 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from w_bot.agents.core.agent import WBotGraph
 from w_bot.agents.core.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
+from w_bot.agents.core.context import ContextBuilder
 from w_bot.agents.core.escalation import EscalationManager, EscalationRequest
-from w_bot.agents.core.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
+from w_bot.agents.core.file_checkpointer import resolve_short_term_memory_path
 from w_bot.agents.core.logging_config import get_logger, setup_logging
+from w_bot.agents.core.memory_context import MemoryContextRetriever
 from w_bot.agents.core.message_utils import message_kind
 from w_bot.agents.core.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.core.provider_factory import build_langchain_llm
+from w_bot.agents.core.runtime import AgentRuntime
+from w_bot.agents.core.session_db import SessionStore, resolve_session_store_path
+from w_bot.agents.core.session_models import RuntimeConfig
 from w_bot.agents.core.session_search_store import SessionSearchDB, resolve_session_search_db_path
 from w_bot.agents.core.streaming import StreamTextAssembler, _latest_ai_reply_from_result, _message_to_text
 from w_bot.agents.core.text_sanitizer import sanitize_user_text
@@ -269,7 +273,7 @@ def run_web_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
     settings = load_settings(config_path=config_path)
     setup_logging(enable_console_logs=settings.enable_console_logs)
     cfg = load_gateway_config(config_path)
-    logger.info("Building graph for Web gateway")
+    logger.info("Building AgentRuntime for Web gateway")
 
     if not cfg.web.enabled:
         logger.warning("Web config loaded but channels.web.enabled=false")
@@ -320,51 +324,52 @@ def run_web_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
     if settings.short_term_memory_optimization.enabled:
         logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
 
-    with WorkspaceFileCheckpointer(short_term_memory_path) as checkpointer:
-        if hasattr(checkpointer, "setup"):
-            checkpointer.setup()
-
-        graph = WBotGraph(
-            llm=llm_text,
-            tools=tools,
+    runtime = AgentRuntime(
+        llm=llm_text,
+        llm_image=llm_image,
+        llm_audio=llm_audio,
+        session_store=SessionStore(resolve_session_store_path(settings.session_store_path)),
+        user_id=settings.user_id,
+        source="web",
+        model_name=settings.model_routing.text_model_name,
+        memory_retriever=MemoryContextRetriever(
             memory_store=memory_store,
-            retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
-            checkpointer=checkpointer,
+            retrieve_top_k=settings.retrieve_top_k,
+        ),
+        context_builder=ContextBuilder(
             skills_loader=skills_loader,
             openclaw_profile_loader=openclaw_profile_loader,
-            multimodal_settings=settings.multimodal,
-            model_name=settings.model_routing.text_model_name,
-            llm_image=llm_image,
-            llm_audio=llm_audio,
-            image_model_name=settings.model_routing.image_model_name,
-            audio_model_name=settings.model_routing.audio_model_name,
             token_optimization_settings=settings.token_optimization,
-            max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
-            max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
-            session_search_db=session_search_db,
-            session_source="web",
-        ).app
+        ),
+        tools=tools,
+        session_search_db=session_search_db,
+        token_optimization_settings=settings.token_optimization,
+    )
 
-        app = _build_app(
-            graph=graph,
-            thread_prefix=cfg.thread_prefix,
-            expose_step_logs=settings.expose_step_logs,
-            recursion_limit=settings.loop_guard.recursion_limit,
-            escalation_manager=escalation_manager,
-            auth_config=cfg.web.auth,
-        )
-        uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
+    app = _build_app(
+        runtime=runtime,
+        thread_prefix=cfg.thread_prefix,
+        expose_step_logs=settings.expose_step_logs,
+        recursion_limit=settings.loop_guard.recursion_limit,
+        max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
+        max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
+        escalation_manager=escalation_manager,
+        auth_config=cfg.web.auth,
+    )
+    uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="info")
 
 
 def _build_app(
     *,
-    graph: Any,
+    runtime: Any,
     thread_prefix: str,
     expose_step_logs: bool,
     recursion_limit: int,
     escalation_manager: EscalationManager,
     auth_config: WebAuthConfig,
+    max_tool_steps_per_turn: int = 8,
+    max_same_tool_call_repeats: int = 3,
 ) -> FastAPI:
     app = FastAPI(title="W-bot Web Gateway")
     session_locks: dict[str, threading.Lock] = {}
@@ -381,6 +386,22 @@ def _build_app(
                 lock = threading.Lock()
                 session_locks[normalized] = lock
             return lock
+
+    def _runtime_config(
+        *,
+        status_callback: Any = None,
+        stream_token_callback: Any = None,
+        tool_progress_callback: Any = None,
+    ) -> RuntimeConfig:
+        return RuntimeConfig(
+            recursion_limit=recursion_limit,
+            max_tool_steps_per_turn=max_tool_steps_per_turn,
+            max_same_tool_call_repeats=max_same_tool_call_repeats,
+            defer_summary_update=True,
+            status_callback=status_callback,
+            stream_token_callback=stream_token_callback,
+            tool_progress_callback=tool_progress_callback,
+        )
 
     @app.middleware("http")
     async def web_auth_middleware(request: Request, call_next: Any) -> Any:
@@ -444,17 +465,14 @@ def _build_app(
     def get_history(session_id: str, request: Request) -> HistoryResponse:
         user = _require_user(request)
         normalized_session_id = _ensure_session_owned_by_user(user, session_id)
-        config = {"configurable": {"thread_id": normalized_session_id}}
 
         with _session_lock(normalized_session_id):
             try:
-                snapshot = graph.get_state(config)
+                messages = runtime.get_session_messages(normalized_session_id)
             except Exception as exc:
                 logger.exception("Failed to load history for session_id=%s", session_id)
                 raise HTTPException(status_code=500, detail="Failed to load history") from exc
 
-        values = getattr(snapshot, "values", None) or {}
-        messages = values.get("messages", [])
         normalized: list[dict[str, str]] = []
         for message in messages:
             kind = message_kind(message)
@@ -476,23 +494,19 @@ def _build_app(
 
         session_id = (payload.session_id or "").strip() or _new_session_id(thread_prefix)
         session_id = _ensure_session_owned_by_user(user, session_id)
-        config = {
-            "configurable": {
-                "thread_id": session_id,
-                "defer_summary_update": True,
-            },
-            "recursion_limit": recursion_limit,
-        }
-        inputs = {"messages": [HumanMessage(content=message)]}
 
         with _session_lock(session_id):
             try:
-                result = graph.invoke(inputs, config=config)
+                turn_result = runtime.run_turn(
+                    session_id=session_id,
+                    inbound_messages=[HumanMessage(content=message)],
+                    config=_runtime_config(),
+                )
+                latest_ai_text = turn_result.final_response
             except Exception as exc:
                 logger.exception("Failed to process web chat request")
                 raise HTTPException(status_code=500, detail="Chat processing failed") from exc
 
-        latest_ai_text = _latest_ai_reply_from_result(result)
         if not latest_ai_text:
             latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
         return ChatResponse(session_id=session_id, reply=latest_ai_text)
@@ -691,20 +705,18 @@ def _build_app(
 
                 if expose_step_logs:
                     emit_status("请求已接收，开始处理。")
-                config = {
-                    "configurable": {
-                        "thread_id": session_id,
-                        "token_callback": emit_token,
-                        "status_callback": emit_status if expose_step_logs else None,
-                        "tool_progress_callback": emit_tool_progress if expose_step_logs else None,
-                        "defer_summary_update": True,
-                    },
-                    "recursion_limit": recursion_limit,
-                }
-                inputs = {"messages": [HumanMessage(content=message)]}
                 try:
                     with _session_lock(session_id):
-                        result = graph.invoke(inputs, config=config)
+                        turn_result = runtime.run_turn(
+                            session_id=session_id,
+                            inbound_messages=[HumanMessage(content=message)],
+                            config=_runtime_config(
+                                status_callback=emit_status if expose_step_logs else None,
+                                stream_token_callback=emit_token,
+                                tool_progress_callback=emit_tool_progress if expose_step_logs else None,
+                            ),
+                        )
+                        result = {"messages": turn_result.messages, "final_response": turn_result.final_response}
                     if expose_step_logs:
                         emit_status("处理完成。")
                 except Exception:
@@ -713,7 +725,9 @@ def _build_app(
                     result = None
                 finally:
                     flush_token_buffer(force=True)
-                    latest_ai_text = _latest_ai_reply_from_result(result)
+                    latest_ai_text = str((result or {}).get("final_response") or "").strip()
+                    if not latest_ai_text:
+                        latest_ai_text = _latest_ai_reply_from_result(result)
                     if not latest_ai_text:
                         latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
                     if not streamed_any_token:

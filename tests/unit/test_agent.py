@@ -141,10 +141,10 @@ class TestAgentImports:
         """Test that key classes and functions are importable."""
         from w_bot.agents.core.agent import (
             AgentState,
-            ScheduledGraphApp,
+            _tool_args_preview,
         )
         assert AgentState is not None
-        assert ScheduledGraphApp is not None
+        assert callable(_tool_args_preview)
 
     def test_intent_detection_imports(self) -> None:
         """Test intent detection functions are importable."""

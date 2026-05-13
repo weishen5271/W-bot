@@ -5,12 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "w-bot-cli"
 version = "0.1.0"
-description = "W-bot CLI Agent (LangGraph + Qwen + Local Memory + Milvus + E2B)"
+description = "W-bot CLI Agent (AgentRuntime + Qwen + Local Memory + Milvus + E2B)"
 requires-python = ">=3.10"
 dependencies = [
     "langchain>=0.3.0",
     "langchain-openai>=0.3.0",
-    "langgraph>=0.2.0",
     "pymilvus>=2.4.0",
     "langchain-milvus>=0.1.0",
     "langchain-community>=0.3.0",

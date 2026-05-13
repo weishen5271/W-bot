@@ -16,15 +16,18 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from w_bot.agents.core.agent import WBotGraph
 from w_bot.agents.core.config import DEFAULT_APP_CONFIG_PATH, default_app_config, load_settings
+from w_bot.agents.core.context import ContextBuilder
 from w_bot.agents.core.escalation import EscalationManager, _render_escalation_request_simple
-from w_bot.agents.core.file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
+from w_bot.agents.core.file_checkpointer import resolve_short_term_memory_path
 from w_bot.agents.core.logging_config import get_logger, setup_logging
+from w_bot.agents.core.memory_context import MemoryContextRetriever
 from w_bot.agents.core.openclaw_profile import OpenClawProfileLoader
 from w_bot.agents.core.provider_factory import build_langchain_llm
+from w_bot.agents.core.runtime import AgentRuntime
+from w_bot.agents.core.session_db import SessionStore, resolve_session_store_path
+from w_bot.agents.core.session_models import RuntimeConfig
 from w_bot.agents.core.session_search_store import SessionSearchDB, resolve_session_search_db_path
-from w_bot.agents.core.streaming import _latest_ai_reply_from_result
 from w_bot.agents.core.text_sanitizer import sanitize_user_text
 from w_bot.agents.memory import LongTermMemoryStore
 from w_bot.agents.skills import SkillsLoader
@@ -81,29 +84,31 @@ class FeishuGateway:
     def __init__(
         self,
         *,
-        graph: Any,
+        runtime: Any,
         config: FeishuConfig,
         thread_prefix: str,
         media_root_dir: str = "media",
         expose_step_logs: bool = True,
         recursion_limit: int = 20,
+        max_tool_steps_per_turn: int = 8,
+        max_same_tool_call_repeats: int = 3,
         escalation_manager: EscalationManager | None = None,
     ) -> None:
         """初始化对象并保存运行所需依赖。
         
         Args:
-            graph: 对话图执行器实例。
+            runtime: 显式 AgentRuntime 实例。
             config: 配置对象或配置字典。
             thread_prefix: 线程前缀，用于生成会话 thread_id。
             media_root_dir: 媒体文件落盘根目录。
         """
-        self._graph = graph
+        self._runtime = runtime
         self._config = config
         self._thread_prefix = thread_prefix
         self._seen_message_ids: OrderedDict[str, None] = OrderedDict()
         self._seen_lock = threading.Lock()
-        self._graph_locks: dict[str, threading.Lock] = {}
-        self._graph_locks_guard = threading.Lock()
+        self._runtime_locks: dict[str, threading.Lock] = {}
+        self._runtime_locks_guard = threading.Lock()
         self._session_lock = threading.Lock()
         self._session_overrides: dict[str, str] = {}
         self._client: Any | None = None
@@ -111,18 +116,20 @@ class FeishuGateway:
         self._media_root = Path(media_root_dir).expanduser()
         self._expose_step_logs = expose_step_logs
         self._recursion_limit = max(1, int(recursion_limit))
+        self._max_tool_steps_per_turn = max(1, int(max_tool_steps_per_turn))
+        self._max_same_tool_call_repeats = max(1, int(max_same_tool_call_repeats))
         self._escalation_manager = escalation_manager
         if not self._media_root.is_absolute():
             self._media_root = Path.cwd() / self._media_root
         self._media_root.mkdir(parents=True, exist_ok=True)
 
-    def _graph_lock_for_session(self, session_id: str) -> threading.Lock:
+    def _runtime_lock_for_session(self, session_id: str) -> threading.Lock:
         normalized = session_id.strip() or "_default"
-        with self._graph_locks_guard:
-            lock = self._graph_locks.get(normalized)
+        with self._runtime_locks_guard:
+            lock = self._runtime_locks.get(normalized)
             if lock is None:
                 lock = threading.Lock()
-                self._graph_locks[normalized] = lock
+                self._runtime_locks[normalized] = lock
             return lock
 
     def start(self) -> None:
@@ -320,35 +327,35 @@ class FeishuGateway:
                     suffix += " [error]"
                 emit_status(f"工具执行完成：{label}{suffix}")
 
-        config = {
-            "configurable": {
-                "thread_id": session_id,
-                "status_callback": emit_status if self._expose_step_logs else None,
-                "tool_progress_callback": emit_tool_progress if self._expose_step_logs else None,
-                "defer_summary_update": True,
-            },
-            "recursion_limit": self._recursion_limit,
-        }
         media_payload = [item.to_dict() for item in inbound.media]
         prompt_text = _build_inbound_prompt_text(inbound)
-        inputs = {
-            "messages": [
-                HumanMessage(
-                    content=prompt_text,
-                    additional_kwargs={"media": media_payload} if media_payload else {},
-                )
-            ]
-        }
+        inbound_messages = [
+            HumanMessage(
+                content=prompt_text,
+                additional_kwargs={"media": media_payload} if media_payload else {},
+            )
+        ]
         latest_ai_text = ""
 
         try:
-            with self._graph_lock_for_session(session_id):
-                result = self._graph.invoke(inputs, config=config)
+            with self._runtime_lock_for_session(session_id):
+                result = self._runtime.run_turn(
+                    session_id=session_id,
+                    inbound_messages=inbound_messages,
+                    config=RuntimeConfig(
+                        recursion_limit=self._recursion_limit,
+                        max_tool_steps_per_turn=self._max_tool_steps_per_turn,
+                        max_same_tool_call_repeats=self._max_same_tool_call_repeats,
+                        defer_summary_update=True,
+                        status_callback=emit_status if self._expose_step_logs else None,
+                        tool_progress_callback=emit_tool_progress if self._expose_step_logs else None,
+                    ),
+                )
         except Exception:
             logger.exception("Failed to process feishu chat round, session_id=%s", session_id)
             return "本轮处理出现异常，但服务仍在运行。请稍后重试。"
 
-        latest_ai_text = _latest_ai_reply_from_result(result)
+        latest_ai_text = str(getattr(result, "final_response", "") or "").strip()
 
         if self._expose_step_logs and status_lines:
             status_block = "\n".join(f"- {line}" for line in status_lines)
@@ -891,7 +898,7 @@ def run_feishu_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
     cfg = load_gateway_config(config_path)
     if not cfg.feishu.enabled:
         logger.warning("Feishu config loaded but channels.feishu.enabled=false")
-    logger.info("Building graph for Feishu gateway")
+    logger.info("Building AgentRuntime for Feishu gateway")
 
     llm_text = _build_llm(settings, model_name=settings.model_routing.text_model_name)
     llm_image = (
@@ -939,42 +946,41 @@ def run_feishu_gateway(config_path: str = DEFAULT_APP_CONFIG_PATH) -> None:
     if settings.short_term_memory_optimization.enabled:
         logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
 
-    with WorkspaceFileCheckpointer(short_term_memory_path) as checkpointer:
-        if hasattr(checkpointer, "setup"):
-            checkpointer.setup()
-
-        graph = WBotGraph(
-            llm=llm_text,
-            tools=tools,
+    runtime = AgentRuntime(
+        llm=llm_text,
+        llm_image=llm_image,
+        llm_audio=llm_audio,
+        session_store=SessionStore(resolve_session_store_path(settings.session_store_path)),
+        user_id=settings.user_id,
+        source="feishu",
+        model_name=settings.model_routing.text_model_name,
+        memory_retriever=MemoryContextRetriever(
             memory_store=memory_store,
-            retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
-            checkpointer=checkpointer,
+            retrieve_top_k=settings.retrieve_top_k,
+        ),
+        context_builder=ContextBuilder(
             skills_loader=skills_loader,
             openclaw_profile_loader=openclaw_profile_loader,
-            multimodal_settings=settings.multimodal,
-            model_name=settings.model_routing.text_model_name,
-            llm_image=llm_image,
-            llm_audio=llm_audio,
-            image_model_name=settings.model_routing.image_model_name,
-            audio_model_name=settings.model_routing.audio_model_name,
             token_optimization_settings=settings.token_optimization,
-            max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
-            max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
-            session_search_db=session_search_db,
-            session_source="feishu",
-        ).app
+        ),
+        tools=tools,
+        session_search_db=session_search_db,
+        token_optimization_settings=settings.token_optimization,
+    )
 
-        gateway = FeishuGateway(
-            graph=graph,
-            config=cfg.feishu,
-            thread_prefix=cfg.thread_prefix,
-            media_root_dir=settings.multimodal.media_root_dir,
-            expose_step_logs=settings.expose_step_logs,
-            recursion_limit=settings.loop_guard.recursion_limit,
-            escalation_manager=escalation_manager,
-        )
-        gateway.start()
+    gateway = FeishuGateway(
+        runtime=runtime,
+        config=cfg.feishu,
+        thread_prefix=cfg.thread_prefix,
+        media_root_dir=settings.multimodal.media_root_dir,
+        expose_step_logs=settings.expose_step_logs,
+        recursion_limit=settings.loop_guard.recursion_limit,
+        max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
+        max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
+        escalation_manager=escalation_manager,
+    )
+    gateway.start()
 
 
 def main() -> None:

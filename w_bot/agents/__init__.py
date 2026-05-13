@@ -1,8 +1,8 @@
 """W-bot CLI Agent package."""
 
 # Core components
-from .core.agent import WBotGraph
 from .core.config import Settings, load_settings
+from .core.runtime import AgentRuntime
 
 # Intent classification
 from .intent import IntentClassifier, IntentResult, IntentType, ToolRecommendation, heuristic_classify
@@ -24,7 +24,7 @@ from .tools.runtime import build_tools
 
 __all__ = [
     # Core
-    "WBotGraph",
+    "AgentRuntime",
     "Settings",
     "load_settings",
     # Intent

@@ -40,6 +40,7 @@ class Settings:
     tavily_api_key: str
     memory_file_path: str
     short_term_memory_path: str
+    session_store_path: str
     user_id: str
     session_id: str
     session_state_file_path: str
@@ -226,6 +227,12 @@ def load_settings(
             "shortTermMemoryPath",
             "short_term_memory_path",
             default="memory/short_term_memory.sqlite",
+        ),
+        session_store_path=_string_value(
+            merged,
+            "sessionStorePath",
+            "session_store_path",
+            default="memory/session_store.sqlite",
         ),
         user_id=_string_value(merged, "userId", "user_id", default="cli_user"),
         session_id=_string_value(
@@ -578,6 +585,7 @@ def default_app_config() -> dict[str, Any]:
             "memoryCollection": "w_bot_long_term_memory_cli",
             "memoryFilePath": "memory/MEMORY.md",
             "shortTermMemoryPath": "memory/short_term_memory.sqlite",
+            "sessionStorePath": "memory/session_store.sqlite",
             "userId": "feishu_bot",
             "sessionId": "",
             "sessionStateFilePath": DEFAULT_SESSION_STATE_FILE_PATH,

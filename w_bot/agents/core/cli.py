@@ -27,14 +27,18 @@ from w_bot.utils.helpers import _shorten_text
 from ..memory.memory import LongTermMemoryStore
 from ..skills.skills import SkillsLoader
 from ..tools.runtime import build_tools
-from .agent import WBotGraph, clear_runtime_callbacks, set_runtime_callbacks
 from .config import DEFAULT_APP_CONFIG_PATH, Settings, load_settings
+from .context import ContextBuilder
 from .escalation import EscalationManager, EscalationRequest, _render_escalation_request
-from .file_checkpointer import WorkspaceFileCheckpointer, resolve_short_term_memory_path
+from .file_checkpointer import resolve_short_term_memory_path
 from .logging_config import get_logger, setup_logging
+from .memory_context import MemoryContextRetriever
 from .openclaw_profile import OpenClawProfileLoader
 from .provider_factory import build_langchain_llm
+from .runtime import AgentRuntime
 from .runtime_status import RuntimeStatusSnapshot
+from .session_db import SessionStore, resolve_session_store_path
+from .session_models import RuntimeConfig
 from .session_search_store import SessionSearchDB, resolve_session_search_db_path
 from .session_store import (
     SessionRecord,
@@ -42,7 +46,6 @@ from .session_store import (
 )
 from .streaming import (
     StreamTextAssembler,
-    _latest_ai_reply_from_result,
     _message_to_text,
     normalize_display_text,
 )
@@ -126,7 +129,7 @@ class CliCommandResult:
 @dataclass
 class CliCommandContext:
     app_state: CliAppState
-    graph: Any
+    runtime: Any
     settings: Settings
     session_store: "SessionStateStore"
     escalation_manager: EscalationManager
@@ -529,12 +532,12 @@ def _supports_live_render(console_obj: Console) -> bool:
 def _refresh_cli_meta(
     *,
     app_state: CliAppState,
-    graph: Any,
+    runtime: Any,
     escalation_manager: EscalationManager | None,
 ) -> None:
     app_state.recent_sessions = app_state.recent_sessions or []
     if app_state.runtime_status is not None:
-        app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+        app_state.runtime_status.refresh_tasks(_list_subagents(runtime, limit=20))
     pending_requests = 0
     if escalation_manager is not None:
         pending_requests += len(
@@ -1003,45 +1006,41 @@ def run_cli(
         restrict_to_workspace=settings.restrict_to_workspace,
     )
 
-    logger.info("Initializing workspace short-term checkpointer: %s", short_term_memory_path)
+    logger.info("Initializing explicit AgentRuntime session store: %s", settings.session_store_path)
     if settings.short_term_memory_optimization.enabled:
         logger.warning("shortTermMemoryOptimization is ignored in workspace file mode")
 
-    with WorkspaceFileCheckpointer(short_term_memory_path) as checkpointer:
-        if hasattr(checkpointer, "setup"):
-            logger.info("Running checkpointer setup")
-            checkpointer.setup()
-
-        graph = WBotGraph(
-            llm=llm_text,
-            tools=tools,
+    runtime = AgentRuntime(
+        llm=llm_text,
+        llm_image=llm_image,
+        llm_audio=llm_audio,
+        session_store=SessionStore(resolve_session_store_path(settings.session_store_path)),
+        user_id=settings.user_id,
+        source="cli",
+        model_name=settings.model_routing.text_model_name,
+        memory_retriever=MemoryContextRetriever(
             memory_store=memory_store,
-            retrieve_top_k=settings.retrieve_top_k,
             user_id=settings.user_id,
-            checkpointer=checkpointer,
+            retrieve_top_k=settings.retrieve_top_k,
+        ),
+        context_builder=ContextBuilder(
             skills_loader=skills_loader,
             openclaw_profile_loader=openclaw_profile_loader,
-            multimodal_settings=settings.multimodal,
-            model_name=settings.model_routing.text_model_name,
-            llm_image=llm_image,
-            llm_audio=llm_audio,
-            image_model_name=settings.model_routing.image_model_name,
-            audio_model_name=settings.model_routing.audio_model_name,
             token_optimization_settings=settings.token_optimization,
-            max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
-            max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
-            session_search_db=session_search_db,
-            session_source="cli",
-        ).app
+        ),
+        tools=tools,
+        session_search_db=session_search_db,
+        token_optimization_settings=settings.token_optimization,
+    )
 
-        logger.info("Graph ready, entering REPL loop")
-        _repl(
-            graph=graph,
-            settings=settings,
-            escalation_manager=escalation_manager,
-            skills_loader=skills_loader,
-            force_new_session=force_new_session,
-        )
+    logger.info("AgentRuntime ready, entering REPL loop")
+    _repl(
+        runtime=runtime,
+        settings=settings,
+        escalation_manager=escalation_manager,
+        skills_loader=skills_loader,
+        force_new_session=force_new_session,
+    )
 
 
 def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
@@ -1055,7 +1054,7 @@ def build_llm(settings: Settings, *, model_name: str) -> ChatOpenAI:
 
 
 def _repl(
-    graph: Any,
+    runtime: Any,
     settings: Settings,
     *,
     escalation_manager: EscalationManager,
@@ -1065,7 +1064,7 @@ def _repl(
     """处理repl相关逻辑并返回结果。
     
     Args:
-        graph: 对话图执行器实例。
+        runtime: 显式 AgentRuntime 实例。
         settings: 全局设置对象。
     """
     console.print("[bold cyan]W-bot CLI[/bold cyan] | type quit/exit to leave")
@@ -1082,10 +1081,10 @@ def _repl(
         runtime_status=runtime_status,
     )
     logger.info("Loaded session_id=%s", current_session_id)
-    _refresh_cli_meta(app_state=app_state, graph=graph, escalation_manager=escalation_manager)
+    _refresh_cli_meta(app_state=app_state, runtime=runtime, escalation_manager=escalation_manager)
     _render_cli_welcome(app_state=app_state)
 
-    _render_existing_session_history(graph=graph, session_id=current_session_id)
+    _render_existing_session_history(runtime=runtime, session_id=current_session_id)
     input_reader = CliInputReader(settings=settings, commands=_build_slash_commands(), app_state=app_state)
 
     while True:
@@ -1096,15 +1095,15 @@ def _repl(
         app_state.session_id = current_session_id
         if app_state.runtime_status is not None:
             app_state.runtime_status.set_session(current_session_id)
-            app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+            app_state.runtime_status.refresh_tasks(_list_subagents(runtime, limit=20))
         app_state.recent_sessions = session_store.list_recent()
-        _refresh_cli_meta(app_state=app_state, graph=graph, escalation_manager=escalation_manager)
+        _refresh_cli_meta(app_state=app_state, runtime=runtime, escalation_manager=escalation_manager)
         if user_text.startswith("/"):
             command_result = _handle_slash_command(
                 raw_text=user_text,
                 context=CliCommandContext(
                     app_state=app_state,
-                    graph=graph,
+                    runtime=runtime,
                     settings=settings,
                     session_store=session_store,
                     escalation_manager=escalation_manager,
@@ -1138,7 +1137,7 @@ def _repl(
         logger.info("Received user input, len=%s", len(user_text))
         console.print(_render_user_message_panel(user_text))
         _run_agent_turn(
-            graph=graph,
+            runtime=runtime,
             settings=settings,
             session_store=session_store,
             app_state=app_state,
@@ -1149,7 +1148,7 @@ def _repl(
 
 def _run_agent_turn(
     *,
-    graph: Any,
+    runtime: Any,
     settings: Settings,
     session_store: SessionStateStore,
     app_state: CliAppState,
@@ -1161,7 +1160,7 @@ def _run_agent_turn(
         app_state.runtime_status.begin_turn(
             recent_action=_shorten_text((user_text or "").strip().splitlines()[0] if user_text else "", 120),
         )
-        app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+        app_state.runtime_status.refresh_tasks(_list_subagents(runtime, limit=20))
     renderer = CliStreamRenderer(console, runtime_status=app_state.runtime_status)
     latest_ai_text = ""
 
@@ -1196,32 +1195,31 @@ def _run_agent_turn(
         if raw.startswith("fallback_emit_final_text"):
             renderer.update_status("模型未返回增量片段，改为输出最终文本。")
 
-    config = {
-        "configurable": {
-            "thread_id": app_state.session_id,
-            "status_callback": emit_status,
-            "token_callback": emit_token,
-            "debug_callback": emit_debug,
-            "tool_progress_callback": emit_tool_progress,
-            "defer_summary_update": True,
-        },
-        "recursion_limit": settings.loop_guard.recursion_limit,
-    }
-    inputs = {"messages": [HumanMessage(content=user_text)]}
-
     renderer.update_status("请求已接收，开始处理。")
-    set_runtime_callbacks(token_callback=emit_token, debug_callback=emit_debug)
     try:
-        result = graph.invoke(inputs, config=config)
-        latest_ai_text = _latest_ai_reply_from_result(result)
-        _refresh_runtime_usage(graph=graph, app_state=app_state)
+        result = runtime.run_turn(
+            session_id=app_state.session_id,
+            inbound_messages=[HumanMessage(content=user_text)],
+            config=RuntimeConfig(
+                recursion_limit=settings.loop_guard.recursion_limit,
+                max_tool_steps_per_turn=settings.loop_guard.max_tool_steps_per_turn,
+                max_same_tool_call_repeats=settings.loop_guard.max_same_tool_call_repeats,
+                defer_summary_update=True,
+                status_callback=emit_status,
+                stream_token_callback=emit_token,
+                debug_callback=emit_debug,
+                tool_progress_callback=emit_tool_progress,
+            ),
+        )
+        latest_ai_text = result.final_response
+        _refresh_runtime_usage(runtime=runtime, app_state=app_state)
         _persist_session_snapshot(session_store=session_store, app_state=app_state)
     except Exception as exc:
         logger.exception("Conversation round failed but REPL will continue")
         detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
         if app_state.runtime_status is not None:
             app_state.runtime_status.mark_failed(detail or str(exc))
-            app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+            app_state.runtime_status.refresh_tasks(_list_subagents(runtime, limit=20))
         _persist_session_snapshot(session_store=session_store, app_state=app_state)
         renderer.finish("")
         console.print(
@@ -1235,33 +1233,31 @@ def _run_agent_turn(
         if detail:
             console.print(_panelize_message(f"[red]异常详情：{detail}[/red]", title="异常详情", border_style="red"))
         return ""
-    finally:
-        clear_runtime_callbacks()
 
     if not latest_ai_text:
         latest_ai_text = "我收到了你的消息，但暂时没有生成可用回复。"
     if app_state.runtime_status is not None:
         app_state.runtime_status.set_phase("rendering", "整理结果中", recent_action="汇总本轮输出")
-        app_state.runtime_status.refresh_tasks(graph.list_subagents(limit=20))
+        app_state.runtime_status.refresh_tasks(_list_subagents(runtime, limit=20))
     renderer.finish(latest_ai_text)
     if app_state.runtime_status is not None:
         app_state.runtime_status.set_phase("idle", "空闲", recent_action="等待下一条输入")
         _persist_session_snapshot(session_store=session_store, app_state=app_state)
     if escalation_manager is not None:
         _maybe_prompt_escalation_choices(
-            graph=graph,
+            runtime=runtime,
             settings=settings,
             session_store=session_store,
             app_state=app_state,
             escalation_manager=escalation_manager,
         )
-    _refresh_cli_meta(app_state=app_state, graph=graph, escalation_manager=escalation_manager)
+    _refresh_cli_meta(app_state=app_state, runtime=runtime, escalation_manager=escalation_manager)
     return latest_ai_text
 
 
 def _maybe_prompt_escalation_choices(
     *,
-    graph: Any,
+    runtime: Any,
     settings: Settings,
     session_store: SessionStateStore,
     app_state: CliAppState,
@@ -1305,7 +1301,7 @@ def _maybe_prompt_escalation_choices(
             "请继续当前任务；如果需要执行该命令，直接调用对应工具，不要重复申请提权。"
         )
         _run_agent_turn(
-            graph=graph,
+            runtime=runtime,
             settings=settings,
             session_store=session_store,
             app_state=app_state,
@@ -1451,18 +1447,30 @@ def _run_escalation_tui(*, title: str, text: str) -> str:
     return result["value"]
 
 
-def _refresh_runtime_usage(*, graph: Any, app_state: CliAppState) -> None:
+def _refresh_runtime_usage(*, runtime: Any, app_state: CliAppState) -> None:
     status = app_state.runtime_status
     if status is None:
         return
-    stats = _collect_session_snapshot_stats(graph=graph, session_id=app_state.session_id)
+    stats = _collect_session_snapshot_stats(runtime=runtime, session_id=app_state.session_id)
     estimate = _estimate_session_cost(stats)
     status.update_usage(
         input_tokens=int(stats.get("input_tokens", 0) or 0),
         output_tokens=int(stats.get("output_tokens", 0) or 0),
         total_cost=estimate if estimate is not None else status.total_cost,
     )
-    status.refresh_tasks(graph.list_subagents(limit=20))
+    status.refresh_tasks(_list_subagents(runtime, limit=20))
+
+
+def _list_subagents(runtime: Any, *, limit: int = 20) -> list[dict[str, Any]]:
+    adapter = getattr(runtime, "compat_adapter", None)
+    list_func = getattr(adapter, "list_subagents", None)
+    if not callable(list_func):
+        return []
+    try:
+        return list(list_func(limit=limit))
+    except Exception:
+        logger.debug("Failed to list runtime subagents", exc_info=True)
+        return []
 
 
 def _persist_session_snapshot(*, session_store: SessionStateStore, app_state: CliAppState) -> None:
@@ -1495,25 +1503,21 @@ def _print_failure_report(app_state: CliAppState) -> None:
 
 def _render_existing_session_history(
     *,
-    graph: Any,
+    runtime: Any,
     session_id: str,
 ) -> None:
     """将数据渲染为目标文本或展示格式。
     
     Args:
-        graph: 对话图执行器实例。
+        runtime: 显式 AgentRuntime 实例。
         session_id: 业务对象唯一标识。
-        seen_message_signatures: 消息签名集合，用于去重渲染。
     """
-    config = {"configurable": {"thread_id": session_id}}
     try:
-        snapshot = graph.get_state(config)
+        messages = runtime.get_session_messages(session_id)
     except Exception:
         logger.exception("Failed to load session history for thread_id=%s", session_id)
         return
 
-    values = getattr(snapshot, "values", None) or {}
-    messages = values.get("messages", [])
     if not messages:
         console.print("[dim]No previous messages in this session.[/dim]")
         return
@@ -1806,7 +1810,7 @@ def _cmd_resume(args: str, context: CliCommandContext) -> CliCommandResult:
         context.app_state.runtime_status.set_session(session_id)
         context.app_state.runtime_status.set_phase("idle", "空闲", recent_action="已恢复会话")
     context.session_store.save(session_id, workspace_root=str(Path.cwd().resolve()))
-    _render_existing_session_history(graph=context.graph, session_id=session_id)
+    _render_existing_session_history(runtime=context.runtime, session_id=session_id)
     return CliCommandResult(message=f"[bold green]Resumed session:[/bold green] {session_id}")
 
 
@@ -1881,7 +1885,7 @@ def _cmd_approve(args: str, context: CliCommandContext) -> CliCommandResult:
         "请继续当前任务；如果需要执行该命令，直接调用 exec，不要重复申请提权。"
     )
     _run_agent_turn(
-        graph=context.graph,
+        runtime=context.runtime,
         settings=context.settings,
         session_store=context.session_store,
         app_state=context.app_state,
@@ -1972,8 +1976,8 @@ def _cmd_status(args: str, context: CliCommandContext) -> CliCommandResult:
     status = context.app_state.runtime_status
     if status is None:
         return CliCommandResult(message="[dim]当前运行时状态不可用。[/dim]")
-    status.refresh_tasks(context.graph.list_subagents(limit=20))
-    _refresh_runtime_usage(graph=context.graph, app_state=context.app_state)
+    status.refresh_tasks(_list_subagents(context.runtime, limit=20))
+    _refresh_runtime_usage(runtime=context.runtime, app_state=context.app_state)
     lines = [
         "[bold cyan]Runtime Status[/bold cyan]",
         f"- session: {context.app_state.session_id}",
@@ -1995,7 +1999,7 @@ def _cmd_status(args: str, context: CliCommandContext) -> CliCommandResult:
 
 def _cmd_tasks(args: str, context: CliCommandContext) -> CliCommandResult:
     query = args.strip().lower()
-    jobs = context.graph.list_subagents(limit=20)
+    jobs = _list_subagents(context.runtime, limit=20)
     if query:
         jobs = [job for job in jobs if query == str(job.get("status") or "").strip().lower() or query in str(job.get("id") or "").lower()]
     if context.app_state.runtime_status is not None:
@@ -2028,7 +2032,7 @@ def _cmd_history(args: str, context: CliCommandContext) -> CliCommandResult:
             count = max(1, min(int(args.strip()), 20))
         except ValueError:
             return CliCommandResult(message="[yellow]Usage:[/yellow] /history [count]")
-    preview = _session_history_preview(graph=context.graph, session_id=context.app_state.session_id, limit=count)
+    preview = _session_history_preview(runtime=context.runtime, session_id=context.app_state.session_id, limit=count)
     return CliCommandResult(message=_panelize_message(preview, title="会话历史", border_style="blue"))
 
 
@@ -2044,7 +2048,7 @@ def _cmd_exit(args: str, context: CliCommandContext) -> CliCommandResult:
 
 def _cmd_stats(args: str, context: CliCommandContext) -> CliCommandResult:
     del args
-    stats = _collect_session_snapshot_stats(graph=context.graph, session_id=context.app_state.session_id)
+    stats = _collect_session_snapshot_stats(runtime=context.runtime, session_id=context.app_state.session_id)
     lines = [
         f"[bold green]Session[/bold green]: {context.app_state.session_id}",
         f"[bold cyan]Messages[/bold cyan]: total={stats['message_count']} user={stats['user_messages']} assistant={stats['assistant_messages']} tool={stats['tool_messages']}",
@@ -2059,7 +2063,7 @@ def _cmd_stats(args: str, context: CliCommandContext) -> CliCommandResult:
 
 def _cmd_cost(args: str, context: CliCommandContext) -> CliCommandResult:
     del args
-    stats = _collect_session_snapshot_stats(graph=context.graph, session_id=context.app_state.session_id)
+    stats = _collect_session_snapshot_stats(runtime=context.runtime, session_id=context.app_state.session_id)
     estimate = _estimate_session_cost(stats)
     lines = [
         f"[bold green]Session[/bold green]: {context.app_state.session_id}",
@@ -2157,16 +2161,13 @@ def _cmd_skills(args: str, context: CliCommandContext) -> CliCommandResult:
     return CliCommandResult(message=_panelize_message("\n".join(lines), title="技能详情", border_style="cyan"))
 
 
-def _session_history_preview(*, graph: Any, session_id: str, limit: int = 6) -> str:
-    config = {"configurable": {"thread_id": session_id}}
+def _session_history_preview(*, runtime: Any, session_id: str, limit: int = 6) -> str:
     try:
-        snapshot = graph.get_state(config)
+        messages = runtime.get_session_messages(session_id)
     except Exception:
         logger.exception("Failed to load session history preview for thread_id=%s", session_id)
         return "[red]无法读取会话历史。[/red]"
 
-    values = getattr(snapshot, "values", None) or {}
-    messages = values.get("messages", [])
     if not messages:
         return "[dim]当前会话还没有历史消息。[/dim]"
 
@@ -2182,10 +2183,11 @@ def _session_history_preview(*, graph: Any, session_id: str, limit: int = 6) -> 
     return "\n".join(lines)
 
 
-def _collect_session_snapshot_stats(*, graph: Any, session_id: str) -> dict[str, Any]:
-    config = {"configurable": {"thread_id": session_id}}
+def _collect_session_snapshot_stats(*, runtime: Any, session_id: str) -> dict[str, Any]:
     try:
-        snapshot = graph.get_state(config)
+        messages = runtime.get_session_messages(session_id)
+        summary, summarized_message_count = runtime.session_store.get_summary(session_id)
+        usage_payload = runtime.session_store.get_token_usage(session_id)
     except Exception:
         logger.exception("Failed to collect session stats for thread_id=%s", session_id)
         return {
@@ -2206,8 +2208,6 @@ def _collect_session_snapshot_stats(*, graph: Any, session_id: str) -> dict[str,
             "warnings": "stats unavailable",
         }
 
-    values = getattr(snapshot, "values", None) or {}
-    messages = values.get("messages", [])
     message_count = len(messages) if isinstance(messages, list) else 0
     user_messages = 0
     assistant_messages = 0
@@ -2221,16 +2221,16 @@ def _collect_session_snapshot_stats(*, graph: Any, session_id: str) -> dict[str,
         else:
             assistant_messages += 1
 
-    usage = extract_token_usage(values.get("session_token_usage") or {})
-    budget_state = values.get("token_budget_state") if isinstance(values.get("token_budget_state"), dict) else {}
+    usage = extract_token_usage(usage_payload or {})
+    budget_state: dict[str, Any] = {}
     warnings = _describe_budget_state(budget_state)
     return {
         "message_count": message_count,
         "user_messages": user_messages,
         "assistant_messages": assistant_messages,
         "tool_messages": tool_messages,
-        "summarized_message_count": int(values.get("summarized_message_count") or 0),
-        "context_compaction_level": str(values.get("context_compaction_level") or "none"),
+        "summarized_message_count": int(summarized_message_count or 0),
+        "context_compaction_level": "summary" if summary else "none",
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "cache_creation_input_tokens": usage.cache_creation_input_tokens,
